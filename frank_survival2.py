@@ -1,67 +1,100 @@
-import io
-import base64
-import dash
-from dash import dcc, html
-import dash_bootstrap_components as dbc
-from dash.dependencies import Input, Output
+import plotly.graph_objects as go
+from lifelines import CoxPHFitter, KaplanMeierFitter
+from lifelines.statistics import logrank_test
 import pandas as pd
-import matplotlib.pyplot as plt
-from lifelines import CoxPHFitter
+import numpy as np
+from dash import Dash, dcc, html
+import pandas as pd
+from lifelines.datasets import load_rossi
 
-# Sample DataFrame
-df = pd.DataFrame({
-    'duration': [5, 10, 15, 20, 25],
-    'event': [1, 0, 1, 0, 1],
-    'age': [30, 40, 50, 60, 70],
-    'bmi': [22, 25, 27, 30, 35]
-})
 
-# Fit CoxPH model
-cph = CoxPHFitter()
-cph.fit(df, duration_col='duration', event_col='event')
 
-def fig_to_base64(fig):
-    """Convert a Matplotlib figure to base64 image for Dash"""
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    plt.close(fig)
-    return f'data:image/png;base64,{img_base64}'
+# 1. Cox Fitted Survival Curve
+def plot_cox_fitted(df, duration_col, event_col, covariates, timeline=None):
+    cph = CoxPHFitter()
+    cph.fit(df[[duration_col, event_col] + covariates], duration_col=duration_col, event_col=event_col)
 
-def get_cox_plot_img():
-    fig = cph.plot()
-    return fig_to_base64(fig.figure)
+    if timeline is None:
+        timeline = np.linspace(0, df[duration_col].max(), 100)
 
-def get_partial_effect_img(covariates):
-    fig, ax = plt.subplots()
-    for cov in covariates:
-        if cov in df.columns:
-            try:
-                cph.plot_partial_effects_on_outcome(cov, values=df[cov].unique(), ax=ax)
-            except:
-                continue
-    return fig_to_base64(fig)
+    surv_df = cph.predict_survival_function(df[covariates], times=timeline)
+    
+    fig = go.Figure()
+    for i in range(surv_df.shape[1]):
+        fig.add_trace(go.Scatter(x=timeline, y=surv_df.iloc[:, i], mode='lines', name=f'Sample {i+1}'))
 
-# Dash App
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-app.layout = dbc.Container([
-    html.H2("Cox Model Summary"),
-    html.Img(id='cox-summary-img', src=get_cox_plot_img(), style={'width': '100%'}),
-    html.H4("Partial Effects on Outcome"),
-    dcc.Dropdown(id='covariate-dropdown',
-                 options=[{'label': c, 'value': c} for c in ['age', 'bmi']],
-                 value=['age'],
-                 multi=True),
-    html.Img(id='partial-effects-img', style={'width': '100%'})
-], fluid=True)
+    fig.update_layout(title='Cox Fitted Survival Curves',
+                      xaxis_title='Time',
+                      yaxis_title='Survival Probability')
+    return fig
 
-@app.callback(
-    Output('partial-effects-img', 'src'),
-    Input('covariate-dropdown', 'value')
-)
-def update_partial_effect_img(selected_covs):
-    return get_partial_effect_img(selected_covs)
+# 2. Log-rank Test Plot
+def plot_logrank(df, duration_col, event_col, group_col):
+    fig = go.Figure()
+    kmf = KaplanMeierFitter()
+    
+    for name, grouped_df in df.groupby(group_col):
+        kmf.fit(grouped_df[duration_col], grouped_df[event_col])
+        fig.add_trace(go.Scatter(
+            x=kmf.survival_function_.index,
+            y=kmf.survival_function_['KM_estimate'],
+            mode='lines',
+            name=str(name)
+        ))
+
+    groups = df[group_col].unique()
+    if len(groups) == 2:
+        g1 = df[df[group_col] == groups[0]]
+        g2 = df[df[group_col] == groups[1]]
+        result = logrank_test(g1[duration_col], g2[duration_col], g1[event_col], g2[event_col])
+        fig.update_layout(title=f'Log-Rank Test p-value: {result.p_value:.4f}')
+    else:
+        fig.update_layout(title='Log-Rank Plot')
+
+    fig.update_layout(xaxis_title='Time', yaxis_title='Survival Probability')
+    return fig
+
+# 3. Partial Effect on Outcome
+def plot_partial_effect(df, duration_col, event_col, covariates, target_covariate, values):
+    cph = CoxPHFitter()
+    cph.fit(df[[duration_col, event_col] + covariates], duration_col=duration_col, event_col=event_col)
+
+    base_df = df[covariates].median().to_frame().T
+    fig = go.Figure()
+    timeline = np.linspace(0, df[duration_col].max(), 100)
+
+    for val in values:
+        temp_df = base_df.copy()
+        temp_df[target_covariate] = val
+        surv = cph.predict_survival_function(temp_df, times=timeline)
+        fig.add_trace(go.Scatter(x=timeline, y=surv.iloc[:, 0], mode='lines', name=f'{target_covariate}={val}'))
+
+    fig.update_layout(title=f'Partial Effect of {target_covariate} on Survival',
+                      xaxis_title='Time',
+                      yaxis_title='Survival Probability')
+    return fig
+
+
+df = load_rossi()
+
+app = Dash(__name__)
+
+cox_fig = plot_cox_fitted(df, duration_col='week', event_col='arrest', covariates=['age', 'fin', 'prio'])
+logrank_fig = plot_logrank(df, duration_col='week', event_col='arrest', group_col='fin')
+partial_fig = plot_partial_effect(df, duration_col='week', event_col='arrest',
+                                  covariates=['age', 'fin', 'prio'], target_covariate='age',
+                                  values=[20, 30, 40, 50])
+
+app.layout = html.Div([
+    html.H2("Cox Fitted Plot"),
+    dcc.Graph(figure=cox_fig),
+
+    html.H2("Log-Rank Plot"),
+    dcc.Graph(figure=logrank_fig),
+
+    html.H2("Partial Effect on Outcome"),
+    dcc.Graph(figure=partial_fig),
+])
 
 if __name__ == '__main__':
     app.run_server(debug=True)
