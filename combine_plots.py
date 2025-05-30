@@ -27,3 +27,33 @@ combined_fig.update_layout(
 )
 
 combined_fig.show()
+
+
+
+
+import pandas as pd
+import plotly.graph_objects as go
+from lifelines.datasets import load_rossi
+from lifelines import CoxPHFitter
+
+def cox_summary_plot(data, duration_col, event_col):
+    cph = CoxPHFitter()
+    cph.fit(data, duration_col=duration_col, event_col=event_col)
+    summary_df = cph.summary.reset_index().round(3)
+
+    fig = go.Figure(data=[go.Table(
+        header=dict(values=list(summary_df.columns),
+                    fill_color='lightgrey',
+                    align='left'),
+        cells=dict(values=[summary_df[col] for col in summary_df.columns],
+                   fill_color='white',
+                   align='left'))
+    ])
+    
+    fig.update_layout(title='Cox PH Model Summary', margin=dict(l=0, r=0, t=40, b=0))
+    return fig
+
+# Example usage:
+df = load_rossi()
+fig = cox_summary_plot(df, duration_col='week', event_col='arrest')
+fig.show()
