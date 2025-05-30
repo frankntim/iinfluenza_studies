@@ -51,9 +51,74 @@ def cox_summary_plot(data, duration_col, event_col):
     ])
     
     fig.update_layout(title='Cox PH Model Summary', margin=dict(l=0, r=0, t=40, b=0))
-    return fig
+    return cph
 
 # Example usage:
 df = load_rossi()
+cph = cox_summary_plot(df, duration_col='week', event_col='arrest')
+#fig.show()
+
+
+
+
+
+import pandas as pd
+import plotly.graph_objects as go
+from lifelines.datasets import load_rossi
+from lifelines import CoxPHFitter
+
+def cox_summary_plot(data, duration_col, event_col):
+    cph = CoxPHFitter()
+    cph.fit(data, duration_col=duration_col, event_col=event_col)
+    
+    # Model summary
+    summary_df = cph.summary.reset_index().round(3)
+    
+    # Global metrics
+    global_metrics = {
+        "Number of observations": cph._n_examples,
+        "Concordance Index": round(cph.concordance_index_, 3),
+        "AIC": round(cph.AIC_partial_, 3),
+        #"Global p-value": round(cph._compute_p_values_for_log_likelihood_test(), 4),
+    }
+    global_metrics_df = pd.DataFrame(global_metrics.items(), columns=["Metric", "Value"])
+
+    # Plotly figure
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.8, 0.2],
+        vertical_spacing=0.1,
+        subplot_titles=("CoxPH Model Coefficients", "Model Summary Stats"),
+        specs=[
+            [{"type":"table"}],
+            [{"type":"table"}]
+        ]
+    )
+
+    # Coefficient table
+    # Columns renamed for display (e.g., "exp(coef)" → "HR"), 95% Lower HR, HR ,95% Upper HR, p-value
+    fig.add_trace(
+        go.Table(
+            header=dict(values=list(summary_df.columns), fill_color='lightgrey', align='left'),
+            cells=dict(values=[summary_df[col] for col in summary_df.columns], fill_color='white', align='left')
+        ),
+        row=1, col=1
+    )
+
+    # Global stats table
+    fig.add_trace(
+        go.Table(
+            header=dict(values=["Metric", "Value"], fill_color='lightgrey', align='left'),
+            cells=dict(values=[global_metrics_df[col] for col in global_metrics_df.columns], fill_color='white', align='left')
+        ),
+        row=2, col=1
+    )
+
+    fig.update_layout(title='Cox PH Model Summary and Global Statistics', height=600)
+    return fig
+
+# Example usage
+from plotly.subplots import make_subplots
+df = load_rossi()
 fig = cox_summary_plot(df, duration_col='week', event_col='arrest')
-fig.show()
+fig
