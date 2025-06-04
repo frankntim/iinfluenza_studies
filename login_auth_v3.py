@@ -25,7 +25,9 @@ app.layout = html.Div([
             ),
             html.Div(id='warning-message', style={"color": "red", "marginTop": "10px"})
         ])
-    ], id='llm-modal', is_open=False)
+    ], id='llm-modal', is_open=False),
+
+    html.Div(id='disclaimer-div', children="Always review the accuracy of responses.", className="disclaimer-fixed")
 ])
 
 # Callback to open modal from either button
@@ -41,13 +43,15 @@ def open_modal(btn1, btn2, is_open):
         return True
     return is_open
 
-# Callback to check value and either close modal or show warning
+# Callback to check value and either close modal or show warning, and update disclaimer
 @app.callback(
     Output('llm-modal', 'is_open', allow_duplicate=True),
     Output('warning-message', 'children'),
+    Output('disclaimer-div', 'children'),
     Input('llm-dropdown', 'value'),
+    State('disclaimer-div', 'children'),
     prevent_initial_call='initial_duplicate')
-def handle_dropdown_selection(value):
+def handle_dropdown_selection(value, current_disclaimer):
     if value:
         conn = sqlite3.connect('permission_db.db')
         cursor = conn.cursor()
@@ -56,11 +60,12 @@ def handle_dropdown_selection(value):
         conn.close()
 
         if result:
-            return False, ""
+            return False, "", f"Always review the accuracy of responses. (Selected: {value})"
         else:
-            return True, "LLM model not found"
+            return True, "LLM model not found", current_disclaimer
 
-    return dash.no_update, dash.no_update
+    return dash.no_update, dash.no_update, dash.no_update
 
 if __name__ == '__main__':
     app.run_server(debug=True)
+
