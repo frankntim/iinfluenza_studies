@@ -1,71 +1,70 @@
 import dash
-from dash import html, dcc, Input, Output, State, ctx
+from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 import sqlite3
 
+# Initialize the app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+server = app.server
 
+# Function to get allowed LLMs from the database
+def fetch_allowed_llms():
+    conn = sqlite3.connect('permission_db.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT llm_name FROM LLMtypes")
+    llms = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return llms
+
+# List of dropdown options
+llm_options = ['ChatGPT', 'Groq', 'Gemini']
+
+# Layout
 app.layout = html.Div([
-    # Buttons that open modal
-    dbc.Button("New Chat", id="new-chat-button", color="primary", className="me-2"),
-    dbc.Button("Sidebar New Chat", id="sidebar-new-chat-button", color="secondary"),
+    dcc.Store(id="popup-dismissed", data=False),
 
-    # Modal
+    # Popup modal
     dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle("Choose a Model")),
+        dbc.ModalHeader("User Login"),
         dbc.ModalBody([
+            dbc.Input(id="username", placeholder="Enter your username", type="text", className="mb-3"),
+            dbc.Label("Select LLM Type"),
             dcc.Dropdown(
                 id='llm-dropdown',
-                options=[
-                    {'label': 'ChatGPT', 'value': 'ChatGPT'},
-                    {'label': 'Gemini', 'value': 'Gemini'},
-                    {'label': 'Groq', 'value': 'Groq'}
-                ],
-                placeholder="Select a model"
+                options=[{'label': llm, 'value': llm} for llm in llm_options],
+                placeholder="Select LLM type"
             ),
-            html.Div(id='warning-message', style={"color": "red", "marginTop": "10px"})
-        ])
-    ], id='llm-modal', is_open=False),
+            html.Div(id="login-error", className="text-danger mt-2")
+        ]),
+    ],
+    id="login-popup",
+    is_open=True,
+    backdrop='static',
+    keyboard=False
+    ),
 
-    html.Div(id='disclaimer-div', children="Always review the accuracy of responses.", className="disclaimer-fixed")
+    html.Div(id='app-content', children=[
+        html.H3("Welcome to the LLM Dashboard"),
+        html.P("This content is visible after successful login.")
+    ])
 ])
 
-# Callback to open modal from either button
+# Callback to auto-close popup based on valid LLM selection
 @app.callback(
-    Output('llm-modal', 'is_open'),
-    Input('new-chat-button', 'n_clicks'),
-    Input('sidebar-new-chat-button', 'n_clicks'),
-    State('llm-modal', 'is_open'),
+    Output("login-popup", "is_open"),
+    Output("login-error", "children"),
+    Input("llm-dropdown", "value"),
     prevent_initial_call=True
 )
-def open_modal(btn1, btn2, is_open):
-    if ctx.triggered_id in ['new-chat-button', 'sidebar-new-chat-button']:
-        return True
-    return is_open
-
-# Callback to check value and either close modal or show warning, and update disclaimer
-@app.callback(
-    Output('llm-modal', 'is_open', allow_duplicate=True),
-    Output('warning-message', 'children'),
-    Output('disclaimer-div', 'children'),
-    Input('llm-dropdown', 'value'),
-    State('disclaimer-div', 'children'),
-    prevent_initial_call='initial_duplicate')
-def handle_dropdown_selection(value, current_disclaimer):
-    if value:
-        conn = sqlite3.connect('permission_db.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM LLMtypes WHERE name = ?", (value,))
-        result = cursor.fetchone()
-        conn.close()
-
-        if result:
-            return False, "", f"Always review the accuracy of responses. (Selected: {value})"
-        else:
-            return True, "LLM model not found", current_disclaimer
-
-    return dash.no_update, dash.no_update, dash.no_update
+def handle_llm_selection(selected_llm):
+    if not selected_llm:
+        return True, ""
+    
+    allowed_llms = fetch_allowed_llms()
+    if selected_llm in allowed_llms:
+        return False, ""
+    else:
+        return True, f"Access denied: {selected_llm} is not permitted."
 
 if __name__ == '__main__':
     app.run_server(debug=True)
-
