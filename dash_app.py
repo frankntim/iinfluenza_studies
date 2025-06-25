@@ -2,46 +2,54 @@ import dash
 from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 import pandas as pd
-from langchain.agents.agent_types import AgentType
 from langchain.agents import create_pandas_dataframe_agent
-from langchain.memory import ConversationBufferMemory
+from langchain.agents.agent_types import AgentType
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
-
 import threading
 
-# Load titanic.csv
+# Load Titanic CSV
 df = pd.read_csv("titanic.csv")
 
-# Set up streaming handler
+# Streaming handler for Dash UI
 class StreamingHandler(BaseCallbackHandler):
     def __init__(self):
         self.chunks = []
         self.lock = threading.Lock()
+        self.done = False
 
     def on_llm_new_token(self, token: str, **kwargs):
         with self.lock:
             self.chunks.append(token)
 
+    def on_llm_end(self, response, **kwargs):
+        with self.lock:
+            self.done = True
+
     def get_text(self):
         with self.lock:
             return "".join(self.chunks)
 
+    def is_done(self):
+        with self.lock:
+            return self.done
+
     def reset(self):
         with self.lock:
             self.chunks.clear()
+            self.done = False
 
-# Initialize LLM and streaming handler
+# Initialize LLM and agent
 stream_handler = StreamingHandler()
 llm = ChatOpenAI(model="gpt-3.5-turbo", streaming=True, callbacks=[stream_handler])
 agent = create_pandas_dataframe_agent(
     llm=llm,
     df=df,
-    verbose=True,
+    verbose=False,
     agent_type=AgentType.OPENAI_FUNCTIONS,
 )
 
-# Dash app layout
+# Dash setup
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 server = app.server
 
@@ -66,17 +74,14 @@ app.layout = html.Div([
             dbc.Button("Send", id="send-button", n_clicks=0),
             dbc.Button("Close", id="close-chat", className="ms-auto", n_clicks=0),
         ]),
-    ],
-        id="chat-modal",
-        is_open=False,
-        size="lg",
-    ),
+    ], id="chat-modal", is_open=False, size="lg"),
 
     dcc.Interval(id="stream-interval", interval=500, n_intervals=0, disabled=True),
     dcc.Store(id="chat-history", data=[]),
     dcc.Store(id="pending", data=False),
 ])
 
+# Modal toggle
 @app.callback(
     Output("chat-modal", "is_open"),
     [Input("open-chat", "n_clicks"), Input("close-chat", "n_clicks")],
@@ -87,6 +92,7 @@ def toggle_modal(open_click, close_click, is_open):
         return not is_open
     return is_open
 
+# Handle send button: start agent in thread
 @app.callback(
     Output("pending", "data"),
     Output("chat-history", "data"),
@@ -103,27 +109,39 @@ def start_response(n, query, history):
     history.append({"sender": "User", "text": query})
     stream_handler.reset()
 
-    def run_agent():
-        agent.run(query)
+    def run_query():
+        try:
+            agent.invoke(query)
+        except Exception as e:
+            stream_handler.chunks.append(f"\n[Error: {str(e)}]")
+            stream_handler.done = True
 
-    threading.Thread(target=run_agent).start()
+    threading.Thread(target=run_query).start()
     return True, history, ""
 
+# Poll the stream every 500ms
 @app.callback(
     Output("chat-log", "children"),
     Output("stream-interval", "disabled"),
+    Output("chat-history", "data"),
     Input("stream-interval", "n_intervals"),
     State("pending", "data"),
     State("chat-history", "data"),
 )
 def update_stream(n, pending, history):
     if not pending:
-        return [format_chat_log(history)], True
+        return format_chat_log(history), True, history
 
     current_text = stream_handler.get_text()
-    display_history = history + [{"sender": "Bot", "text": current_text}]
-    return [format_chat_log(display_history)], False if current_text else True
+    temp_history = history + [{"sender": "Bot", "text": current_text}]
 
+    if stream_handler.is_done():
+        history.append({"sender": "Bot", "text": current_text})
+        return format_chat_log(history), True, history
+
+    return format_chat_log(temp_history), False, history
+
+# Helper: format chat messages
 def format_chat_log(history):
     return html.Div([
         html.Div([
