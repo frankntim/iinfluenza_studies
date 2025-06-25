@@ -11,7 +11,7 @@ import threading
 # Load Titanic CSV
 df = pd.read_csv("titanic.csv")
 
-# Streaming handler for Dash UI
+# Streaming handler
 class StreamingHandler(BaseCallbackHandler):
     def __init__(self):
         self.chunks = []
@@ -39,7 +39,7 @@ class StreamingHandler(BaseCallbackHandler):
             self.chunks.clear()
             self.done = False
 
-# Initialize LLM and agent
+# Initialize agent
 stream_handler = StreamingHandler()
 llm = ChatOpenAI(model="gpt-3.5-turbo", streaming=True, callbacks=[stream_handler])
 agent = create_pandas_dataframe_agent(
@@ -49,7 +49,7 @@ agent = create_pandas_dataframe_agent(
     agent_type=AgentType.OPENAI_FUNCTIONS,
 )
 
-# Dash setup
+# App setup
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 server = app.server
 
@@ -79,9 +79,10 @@ app.layout = html.Div([
     dcc.Interval(id="stream-interval", interval=500, n_intervals=0, disabled=True),
     dcc.Store(id="chat-history", data=[]),
     dcc.Store(id="pending", data=False),
+    dcc.Store(id="stream-buffer", data=""),
 ])
 
-# Modal toggle
+# Toggle modal
 @app.callback(
     Output("chat-modal", "is_open"),
     [Input("open-chat", "n_clicks"), Input("close-chat", "n_clicks")],
@@ -92,11 +93,12 @@ def toggle_modal(open_click, close_click, is_open):
         return not is_open
     return is_open
 
-# Handle send button: start agent in thread
+# Start agent on send
 @app.callback(
     Output("pending", "data"),
     Output("chat-history", "data"),
     Output("user-input", "value"),
+    Output("stream-buffer", "data"),
     Input("send-button", "n_clicks"),
     State("user-input", "value"),
     State("chat-history", "data"),
@@ -104,7 +106,7 @@ def toggle_modal(open_click, close_click, is_open):
 )
 def start_response(n, query, history):
     if not query:
-        return False, history, ""
+        return False, history, "", ""
 
     history.append({"sender": "User", "text": query})
     stream_handler.reset()
@@ -117,31 +119,44 @@ def start_response(n, query, history):
             stream_handler.done = True
 
     threading.Thread(target=run_query).start()
-    return True, history, ""
+    return True, history, "", ""
 
-# Poll the stream every 500ms
+# Update UI with stream buffer
 @app.callback(
     Output("chat-log", "children"),
     Output("stream-interval", "disabled"),
-    Output("chat-history", "data"),
+    Output("stream-buffer", "data"),
     Input("stream-interval", "n_intervals"),
     State("pending", "data"),
     State("chat-history", "data"),
+    State("stream-buffer", "data"),
 )
-def update_stream(n, pending, history):
+def update_stream(n, pending, history, buffer):
     if not pending:
-        return format_chat_log(history), True, history
+        return format_chat_log(history), True, ""
 
     current_text = stream_handler.get_text()
     temp_history = history + [{"sender": "Bot", "text": current_text}]
 
     if stream_handler.is_done():
-        history.append({"sender": "Bot", "text": current_text})
-        return format_chat_log(history), True, history
+        return format_chat_log(temp_history), True, current_text
 
-    return format_chat_log(temp_history), False, history
+    return format_chat_log(temp_history), False, current_text
 
-# Helper: format chat messages
+# When stream ends, finalize chat history
+@app.callback(
+    Output("chat-history", "data"),
+    Output("pending", "data"),
+    Input("stream-buffer", "data"),
+    State("chat-history", "data"),
+    prevent_initial_call=True
+)
+def finalize_history(buffer, history):
+    if buffer:
+        history.append({"sender": "Bot", "text": buffer})
+    return history, False
+
+# Format chat history
 def format_chat_log(history):
     return html.Div([
         html.Div([
