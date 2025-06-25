@@ -1,107 +1,136 @@
 import dash
 from dash import dcc, html, Input, Output, State
-import plotly.express as px
+import dash_bootstrap_components as dbc
 import pandas as pd
-from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
-from langchain_community.llms import OpenAI  # Or your chosen LLM
-import os
-import json
-import plotly.io as pio
+from langchain.agents.agent_types import AgentType
+from langchain.agents import create_pandas_dataframe_agent
+from langchain.memory import ConversationBufferMemory
+from langchain_core.callbacks.base import BaseCallbackHandler
+from langchain_openai import ChatOpenAI
 
-# Load data (replace with your actual data loading)
-data = {'Category': ['A', 'B', 'C', 'D'],
-        'Value': [25, 40, 30, 55]}
-df = pd.DataFrame(data)
+import threading
 
-# Initialize the Dash app
-app = dash.Dash(__name__)
+# Load titanic.csv
+df = pd.read_csv("titanic.csv")
 
-# Custom prefix for the LangChain agent
-# This prefix guides the agent to produce bar chart instructions
-custom_prefix = """
-You are a data analysis assistant working with a pandas DataFrame named `df`.
-Focus on generating bar charts when requested.
-If a user asks for a bar chart, respond in a JSON format like this:
-{{
-  "bar_chart": {{
-    "x_col": "column_for_x_axis",
-    "y_col": "column_for_y_axis",
-    "title": "Title of the Bar Chart"
-  }}
-}}
-If the request is not for a bar chart, provide a concise text answer in a JSON format like this:
-{{
-  "answer": "Your text response here."
-}}
-"""
+# Set up streaming handler
+class StreamingHandler(BaseCallbackHandler):
+    def __init__(self):
+        self.chunks = []
+        self.lock = threading.Lock()
 
-# Initialize the LangChain agent
-# You'll need to provide your API key for the chosen LLM
-llm = OpenAI(api_key="YOUR_OPENAI_API_KEY") # Replace with your LLM setup
+    def on_llm_new_token(self, token: str, **kwargs):
+        with self.lock:
+            self.chunks.append(token)
+
+    def get_text(self):
+        with self.lock:
+            return "".join(self.chunks)
+
+    def reset(self):
+        with self.lock:
+            self.chunks.clear()
+
+# Initialize LLM and streaming handler
+stream_handler = StreamingHandler()
+llm = ChatOpenAI(model="gpt-3.5-turbo", streaming=True, callbacks=[stream_handler])
 agent = create_pandas_dataframe_agent(
-    llm,
-    df,
+    llm=llm,
+    df=df,
     verbose=True,
-    prefix=custom_prefix,
-    allow_dangerous_code=True # Be cautious with this setting; use in a secure environment
+    agent_type=AgentType.OPENAI_FUNCTIONS,
 )
 
-# Define the layout
+# Dash app layout
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+server = app.server
+
 app.layout = html.Div([
-    html.H1("Data Analysis with AI Agent"),
-    html.Div([
-        html.Label("Enter your query:"),
-        dcc.Input(id='query-input', type='text', value='Show a bar chart of Category vs Value'),
-        html.Button('Ask Agent', id='ask-button', n_clicks=0),
-    ]),
-    html.Div(id='agent-response', children=''),
-    dcc.Graph(id='bar-chart-graph', figure={})  # Area for the bar chart
+    dbc.Button("Open Titanic Chat", id="open-chat", n_clicks=0),
+
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("Titanic Data Chat")),
+        dbc.ModalBody([
+            html.Div(id='chat-log', style={
+                'height': '300px', 'overflowY': 'auto',
+                'border': '1px solid #ccc', 'padding': '10px',
+                'marginBottom': '10px', 'backgroundColor': '#f9f9f9'
+            }),
+            dcc.Textarea(
+                id='user-input',
+                placeholder='Ask a question about Titanic data...',
+                style={'width': '100%', 'height': 100}
+            ),
+        ]),
+        dbc.ModalFooter([
+            dbc.Button("Send", id="send-button", n_clicks=0),
+            dbc.Button("Close", id="close-chat", className="ms-auto", n_clicks=0),
+        ]),
+    ],
+        id="chat-modal",
+        is_open=False,
+        size="lg",
+    ),
+
+    dcc.Interval(id="stream-interval", interval=500, n_intervals=0, disabled=True),
+    dcc.Store(id="chat-history", data=[]),
+    dcc.Store(id="pending", data=False),
 ])
 
-# Define the callback to handle the agent interaction and graph update
 @app.callback(
-    [Output('agent-response', 'children'),
-     Output('bar-chart-graph', 'figure')],
-    Input('ask-button', 'n_clicks'),
-    [State('query-input', 'value')]
+    Output("chat-modal", "is_open"),
+    [Input("open-chat", "n_clicks"), Input("close-chat", "n_clicks")],
+    [State("chat-modal", "is_open")]
 )
-def update_response_and_graph(n_clicks, query):
-    if n_clicks > 0 and query:
-        try:
-            # Run the agent with the query
-            response = agent.run(query)
+def toggle_modal(open_click, close_click, is_open):
+    if open_click or close_click:
+        return not is_open
+    return is_open
 
-            # Attempt to parse the agent's response as JSON
-            response_json = json.loads(response)
+@app.callback(
+    Output("pending", "data"),
+    Output("chat-history", "data"),
+    Output("user-input", "value"),
+    Input("send-button", "n_clicks"),
+    State("user-input", "value"),
+    State("chat-history", "data"),
+    prevent_initial_call=True
+)
+def start_response(n, query, history):
+    if not query:
+        return False, history, ""
 
-            if "bar_chart" in response_json:
-                # If the agent responded with bar chart instructions
-                chart_info = response_json["bar_chart"]
-                x_col = chart_info.get("x_col")
-                y_col = chart_info.get("y_col")
-                title = chart_info.get("title", "Bar Chart")
+    history.append({"sender": "User", "text": query})
+    stream_handler.reset()
 
-                if x_col and y_col and x_col in df.columns and y_col in df.columns:
-                    # Create the Plotly bar chart
-                    fig = px.bar(df, x=x_col, y=y_col, title=title)
+    def run_agent():
+        agent.run(query)
 
-                    # Return the response message and the figure
-                    return f"Agent responded with a bar chart request. Title: {title}", fig
-                else:
-                    return "Agent requested a bar chart, but missing or invalid columns.", {}
+    threading.Thread(target=run_agent).start()
+    return True, history, ""
 
-            elif "answer" in response_json:
-                # If the agent responded with a text answer
-                return response_json["answer"], {}
+@app.callback(
+    Output("chat-log", "children"),
+    Output("stream-interval", "disabled"),
+    Input("stream-interval", "n_intervals"),
+    State("pending", "data"),
+    State("chat-history", "data"),
+)
+def update_stream(n, pending, history):
+    if not pending:
+        return [format_chat_log(history)], True
 
-            else:
-                return "Agent response not in expected format.", {}
+    current_text = stream_handler.get_text()
+    display_history = history + [{"sender": "Bot", "text": current_text}]
+    return [format_chat_log(display_history)], False if current_text else True
 
-        except Exception as e:
-            return f"Error processing agent response: {e}", {}
+def format_chat_log(history):
+    return html.Div([
+        html.Div([
+            html.Strong(f"{msg['sender']}: "),
+            html.Span(msg['text'])
+        ]) for msg in history
+    ])
 
-    return '', {} # Return empty response and figure if no query or button not clicked
-
-# Run the app
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run_server(debug=True)
