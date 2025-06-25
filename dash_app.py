@@ -49,7 +49,7 @@ agent = create_pandas_dataframe_agent(
     agent_type=AgentType.OPENAI_FUNCTIONS,
 )
 
-# Dash app
+# Dash setup
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 server = app.server
 
@@ -76,12 +76,13 @@ app.layout = html.Div([
         ]),
     ], id="chat-modal", is_open=False, size="lg"),
 
-    dcc.Interval(id="stream-interval", interval=500, n_intervals=0, disabled=True),
+    dcc.Interval(id="stream-interval", interval=300, n_intervals=0, disabled=True),
     dcc.Store(id="chat-history", data=[]),
-    dcc.Store(id="pending", data=False),
+    dcc.Store(id="streaming", data=False),
+    dcc.Store(id="new-query", data=""),
 ])
 
-# Modal toggle
+# Toggle modal
 @app.callback(
     Output("chat-modal", "is_open"),
     [Input("open-chat", "n_clicks"), Input("close-chat", "n_clicks")],
@@ -92,9 +93,10 @@ def toggle_modal(open_click, close_click, is_open):
         return not is_open
     return is_open
 
-# Start query
+# Start the query
 @app.callback(
-    Output("pending", "data"),
+    Output("new-query", "data"),
+    Output("streaming", "data"),
     Output("chat-history", "data"),
     Output("user-input", "value"),
     Input("send-button", "n_clicks"),
@@ -102,53 +104,54 @@ def toggle_modal(open_click, close_click, is_open):
     State("chat-history", "data"),
     prevent_initial_call=True
 )
-def start_response(n, query, history):
+def start_query(n, query, history):
     if not query:
-        return False, history, ""
+        return "", False, history, ""
 
     history.append({"sender": "User", "text": query})
     stream_handler.reset()
 
-    def run_query():
+    def run():
         try:
             agent.invoke(query)
         except Exception as e:
-            stream_handler.chunks.append(f"\n[Error: {str(e)}]")
+            stream_handler.chunks.append(f"[Error: {str(e)}]")
             stream_handler.done = True
 
-    threading.Thread(target=run_query).start()
-    return True, history, ""
+    threading.Thread(target=run).start()
 
-# Stream updates
+    return query, True, history, ""
+
+# Stream polling
 @app.callback(
     Output("chat-log", "children"),
+    Output("streaming", "data"),
     Output("stream-interval", "disabled"),
     Output("chat-history", "data"),
-    Output("pending", "data"),
     Input("stream-interval", "n_intervals"),
-    State("pending", "data"),
+    State("streaming", "data"),
     State("chat-history", "data"),
 )
-def update_stream(n, pending, history):
-    if not pending:
-        return format_chat_log(history), True, history, False
+def stream_response(_, streaming, history):
+    if not streaming:
+        return format_chat_log(history), False, True, history
 
     current_text = stream_handler.get_text()
-    temp_history = history + [{"sender": "Bot", "text": current_text}]
+    temp = history + [{"sender": "Bot", "text": current_text}]
 
     if stream_handler.is_done():
         history.append({"sender": "Bot", "text": current_text})
-        return format_chat_log(history), True, history, False
+        return format_chat_log(history), False, True, history
 
-    return format_chat_log(temp_history), False, history, True
+    return format_chat_log(temp), True, False, history
 
-# Format chat
+# Format messages
 def format_chat_log(history):
     return html.Div([
         html.Div([
             html.Strong(f"{msg['sender']}: "),
             html.Span(msg['text'])
-        ]) for msg in history
+        ], style={'marginBottom': '0.5em'}) for msg in history
     ])
 
 if __name__ == "__main__":
