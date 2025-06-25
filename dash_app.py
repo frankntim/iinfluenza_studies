@@ -8,10 +8,10 @@ from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
 import threading
 
-# Load Titanic CSV
+# Load Titanic dataset
 df = pd.read_csv("titanic.csv")
 
-# Streaming handler
+# Custom handler for streaming
 class StreamingHandler(BaseCallbackHandler):
     def __init__(self):
         self.chunks = []
@@ -39,17 +39,12 @@ class StreamingHandler(BaseCallbackHandler):
             self.chunks.clear()
             self.done = False
 
-# Initialize agent
+# Initialize LangChain agent
 stream_handler = StreamingHandler()
 llm = ChatOpenAI(model="gpt-3.5-turbo", streaming=True, callbacks=[stream_handler])
-agent = create_pandas_dataframe_agent(
-    llm=llm,
-    df=df,
-    verbose=False,
-    agent_type=AgentType.OPENAI_FUNCTIONS,
-)
+agent = create_pandas_dataframe_agent(llm=llm, df=df, verbose=False, agent_type=AgentType.OPENAI_FUNCTIONS)
 
-# Dash setup
+# Initialize Dash app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 server = app.server
 
@@ -79,71 +74,71 @@ app.layout = html.Div([
     dcc.Interval(id="stream-interval", interval=300, n_intervals=0, disabled=True),
     dcc.Store(id="chat-history", data=[]),
     dcc.Store(id="streaming", data=False),
-    dcc.Store(id="new-query", data=""),
+    dcc.Store(id="new-query", data=None),
 ])
 
-# Toggle modal
+# Toggle chat modal
 @app.callback(
     Output("chat-modal", "is_open"),
     [Input("open-chat", "n_clicks"), Input("close-chat", "n_clicks")],
     [State("chat-modal", "is_open")]
 )
 def toggle_modal(open_click, close_click, is_open):
-    if open_click or close_click:
-        return not is_open
-    return is_open
+    return not is_open if open_click or close_click else is_open
 
-# Start the query
+# Save new query & user message
 @app.callback(
     Output("new-query", "data"),
-    Output("streaming", "data"),
-    Output("chat-history", "data"),
     Output("user-input", "value"),
     Input("send-button", "n_clicks"),
     State("user-input", "value"),
-    State("chat-history", "data"),
     prevent_initial_call=True
 )
-def start_query(n, query, history):
-    if not query:
-        return "", False, history, ""
+def store_query(n, query):
+    return query, ""
 
-    history.append({"sender": "User", "text": query})
-    stream_handler.reset()
-
-    def run():
-        try:
-            agent.invoke(query)
-        except Exception as e:
-            stream_handler.chunks.append(f"[Error: {str(e)}]")
-            stream_handler.done = True
-
-    threading.Thread(target=run).start()
-
-    return query, True, history, ""
-
-# Stream polling
+# Streaming and agent execution logic in one callback
 @app.callback(
     Output("chat-log", "children"),
+    Output("chat-history", "data"),
     Output("streaming", "data"),
     Output("stream-interval", "disabled"),
-    Output("chat-history", "data"),
     Input("stream-interval", "n_intervals"),
-    State("streaming", "data"),
+    State("new-query", "data"),
     State("chat-history", "data"),
+    State("streaming", "data"),
+    prevent_initial_call=True
 )
-def stream_response(_, streaming, history):
-    if not streaming:
-        return format_chat_log(history), False, True, history
+def stream_response(_, new_query, history, streaming):
+    # If not streaming, but a query is present → start thread
+    if not streaming and new_query:
+        # Store user message
+        history.append({"sender": "User", "text": new_query})
+        stream_handler.reset()
 
-    current_text = stream_handler.get_text()
-    temp = history + [{"sender": "Bot", "text": current_text}]
+        def run():
+            try:
+                agent.invoke(new_query)
+            except Exception as e:
+                stream_handler.chunks.append(f"[Error: {str(e)}]")
+                stream_handler.done = True
 
-    if stream_handler.is_done():
-        history.append({"sender": "Bot", "text": current_text})
-        return format_chat_log(history), False, True, history
+        threading.Thread(target=run).start()
+        return format_chat_log(history + [{"sender": "Bot", "text": ""}]), history, True, False
 
-    return format_chat_log(temp), True, False, history
+    # If streaming in progress → update
+    if streaming:
+        current_text = stream_handler.get_text()
+        temp = history + [{"sender": "Bot", "text": current_text}]
+
+        if stream_handler.is_done():
+            history.append({"sender": "Bot", "text": current_text})
+            return format_chat_log(history), history, False, True
+
+        return format_chat_log(temp), history, True, False
+
+    # Default
+    return format_chat_log(history), history, False, True
 
 # Format messages
 def format_chat_log(history):
