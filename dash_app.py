@@ -19,7 +19,6 @@ app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
 # Initialize the LangChain agent
 # Replace "YOUR_OPENAI_API_KEY" with your actual OpenAI API key
-# Note: Streaming is generally supported with ChatOpenAI
 llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo", api_key="YOUR_OPENAI_API_KEY", streaming=True) # Set streaming=True for ChatOpenAI
 agent = create_pandas_dataframe_agent(
     llm,
@@ -32,7 +31,7 @@ agent = create_pandas_dataframe_agent(
 modal = dbc.Modal(
     [
         dbc.ModalHeader(dbc.ModalTitle("Titanic Chatbot")),
-        dbc.ModalBody(id="modal-body"),
+        dbc.ModalBody(id="modal-body"),  # This is where the response will be displayed
         dbc.ModalFooter(
             [
                 dbc.Input(id="user-input", type="text", placeholder="Enter your query..."),
@@ -51,7 +50,6 @@ app.layout = html.Div(
         html.H1("Titanic Data Analysis with AI Agent"),
         dbc.Button("Open Chatbot", id="open-modal", n_clicks=0),
         modal,
-        html.Div(id='output-area', children=[]),  # This is where streamed output will appear
     ]
 )
 
@@ -68,30 +66,20 @@ def toggle_modal(open_clicks, close_clicks, is_open):
 
 # Callback to send the query and stream the response
 @app.callback(
-    Output("output-area", "children"),
+    Output("modal-body", "children"),  # Output to the modal body
     Input("send-button", "n_clicks"),
     State("user-input", "value"),
 )
 def send_query_and_stream_response(n_clicks, query):
     if n_clicks > 0 and query:
-        # Use a BytesIO buffer to capture the streamed output
-        buffer = io.BytesIO()
-        # Use invoke to get the response from the agent
-        # Although invoke generally returns the final output,
-        # ChatOpenAI with streaming=True can still stream tokens.
-        # However, getting true token-by-token streaming from the *agent's*
-        # final output (which is then fed into invoke) might require more
-        # advanced techniques like callbacks or custom runnables.
-        # For this example, we'll demonstrate a simplified streaming approach.
         try:
-            # Running the agent and capturing the output (not true token-by-token streaming here)
-            response = agent.run(query) # Using run for simplicity in this example
-            # The agent's output is processed before being displayed.
-            # To get true streaming, you would need to use a different approach with callbacks
-            # to capture intermediate outputs of the agent's run.
-            # However, for a demonstration, we will just display the final response.
+            # Running the agent and capturing the output
+            # Note: For true token-by-token streaming, more advanced techniques
+            # like callbacks or custom runnables would be needed.
+            response = agent.run(query)
 
-            return [html.P(response)] # Display the final response in the output area
+            # Display the final response in the modal body
+            return [html.P(response)]
 
         except Exception as e:
             return [html.P(f"Error: {e}")]
