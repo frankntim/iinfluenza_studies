@@ -1,129 +1,134 @@
 import dash
-from dash import dcc, html, Input, Output, State, callback_context
+from dash import html, dcc, Input, Output, State, ctx
 import pandas as pd
-from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
-from langchain_openai import ChatOpenAI
-import dash_bootstrap_components as dbc
+import uuid
 import os
-import json
-import plotly.express as px
+from langchain.agents.agent_types import AgentType
+from langchain.experimental.agents import create_pandas_dataframe_agent
+from langchain_openai import ChatOpenAI
+from langchain_core.callbacks import StreamingStdOutCallbackHandler, BaseCallbackHandler
 
-# Placeholder for the custom callback handler (Requires additional implementation)
-class StreamingCallbackHandler:
-    def __init__(self):
-        self.response_tokens = []
-        self.chart_data = None  # To store chart information if needed
+# Load Titanic CSV
+df = pd.read_csv('titanic.csv')
+
+# Use in-memory storage for chat streaming
+STREAM_CACHE = {}
+
+# Custom streaming handler for Dash UI
+class DashStreamHandler(BaseCallbackHandler):
+    def __init__(self, session_id):
+        self.session_id = session_id
+        STREAM_CACHE[self.session_id] = ""
 
     def on_llm_new_token(self, token: str, **kwargs):
-        self.response_tokens.append(token)
+        STREAM_CACHE[self.session_id] += token
 
-    def on_agent_action(self, action, **kwargs):
-        # Handle agent actions (e.g., tool calls)
-        pass
-
-    def on_agent_finish(self, finish_state, **kwargs):
-        # Process the final response and check for chart instructions
-        try:
-            response_json = json.loads("".join(self.response_tokens))  # Assume agent provides JSON
-            if "bar_chart" in response_json:
-                self.chart_data = response_json["bar_chart"]
-        except json.JSONDecodeError:
-            pass  # Handle non-JSON responses
-
-# Load data (replace with your actual data loading)
-try:
-    df = pd.read_csv('titanic.csv')
-except FileNotFoundError:
-    print("Error: titanic.csv not found.")
-    exit()
-
-# Initialize the Dash app
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-
-# Initialize the LangChain agent
-llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo", api_key="YOUR_OPENAI_API_KEY", streaming=True)
-agent = create_pandas_dataframe_agent(
-    llm,
-    df,
-    verbose=True,
-    allow_dangerous_code=True
+# LangChain Agent Setup
+llm = ChatOpenAI(
+    model="gpt-4",
+    temperature=0,
+    streaming=True,
 )
 
-# Modal component for the chatbot
-modal = dbc.Modal(
-    [
-        dbc.ModalHeader(dbc.ModalTitle("Titanic Chatbot")),
-        dbc.ModalBody(id="modal-body"),
-        dbc.ModalFooter(
-            [
-                dbc.Input(id="user-input", type="text", placeholder="Enter your query..."),
-                dbc.Button("Send", id="send-button", className="ms-auto", n_clicks=0),
-                dbc.Button("Close", id="close-modal", className="ms-auto", n_clicks=0),
-            ]
-        ),
-    ],
-    id="modal",
-    is_open=False,
-    size="xl",  # Set modal size to "xl" for better chart display
-)
+# Dash App Setup
+app = dash.Dash(__name__)
+app.title = "Titanic Chatbot Modal"
+app.layout = html.Div([
+    html.Button("Open Chatbot", id="open-modal", n_clicks=0),
+    dcc.Store(id="session-id", data=str(uuid.uuid4())),
+    dcc.Interval(id="stream-update", interval=500, n_intervals=0, disabled=True),
+    html.Div(id="stream-output", style={"whiteSpace": "pre-wrap", "marginTop": "1rem"}),
 
-app.layout = html.Div(
-    [
-        html.H1("Titanic Data Analysis with AI Agent"),
-        dbc.Button("Open Chatbot", id="open-modal", n_clicks=0),
-        modal,
-        dcc.Interval(id='interval-component', interval=100, n_intervals=0, disabled=True), # Used for background streaming
-        dcc.Store(id='streaming-data', data={}), # To store streaming data
-    ]
-)
+    html.Div([
+        html.Div([
+            html.H2("Titanic Chatbot", style={"marginBottom": "10px"}),
+            dcc.Textarea(id="user-input", style={"width": "100%", "height": "100px"}, placeholder="Ask me about the Titanic dataset..."),
+            html.Button("Send", id="send-btn", n_clicks=0),
+            html.Div(id="chat-log", style={"whiteSpace": "pre-wrap", "height": "300px", "overflowY": "auto", "marginTop": "1rem"}),
+            html.Button("Close", id="close-modal", n_clicks=0, style={"marginTop": "10px"}),
+        ], style={
+            "backgroundColor": "white",
+            "padding": "20px",
+            "borderRadius": "10px",
+            "width": "600px",
+            "maxWidth": "90%",
+            "boxShadow": "0 0 10px rgba(0, 0, 0, 0.2)"
+        }),
+    ], id="modal", style={
+        "display": "none",
+        "position": "fixed",
+        "top": 0, "left": 0, "right": 0, "bottom": 0,
+        "backgroundColor": "rgba(0, 0, 0, 0.5)",
+        "justifyContent": "center",
+        "alignItems": "center",
+        "zIndex": 1000,
+    })
+])
 
+# Modal open/close
 @app.callback(
-    Output("modal", "is_open"),
-    [Input("open-modal", "n_clicks"), Input("close-modal", "n_clicks")],
-    [State("modal", "is_open")],
+    Output("modal", "style"),
+    Input("open-modal", "n_clicks"),
+    Input("close-modal", "n_clicks"),
+    prevent_initial_call=True
 )
-def toggle_modal(open_clicks, close_clicks, is_open):
-    if open_clicks or close_clicks:
-        return not is_open
-    return is_open
+def toggle_modal(open_clicks, close_clicks):
+    if ctx.triggered_id == "open-modal":
+        return {"display": "flex", "position": "fixed", "top": 0, "left": 0, "right": 0, "bottom": 0,
+                "backgroundColor": "rgba(0, 0, 0, 0.5)", "justifyContent": "center", "alignItems": "center", "zIndex": 1000}
+    return {"display": "none"}
 
-# Callback to send the query and trigger streaming
+# Trigger LLM streaming
 @app.callback(
-    Output("interval-component", "disabled"),
-    Input("send-button", "n_clicks"),
+    Output("stream-update", "disabled"),
+    Input("send-btn", "n_clicks"),
     State("user-input", "value"),
+    State("session-id", "data"),
+    prevent_initial_call=True
 )
-def start_agent_streaming(n_clicks, query):
-    if n_clicks > 0 and query:
-        # Trigger the agent run in a background task here
-        # The background task would use the StreamingCallbackHandler to capture tokens
-        # and send them to the frontend (e.g., via dcc.Store or a different mechanism)
-        return False # Enable the interval component for streaming updates
-    return True
+def send_query(n, user_input, session_id):
+    if not user_input:
+        return True
 
-# Callback to update modal body with streamed data
+    # Clear stream
+    STREAM_CACHE[session_id] = ""
+
+    # Launch async agent invoke
+    def run_agent():
+        handler = DashStreamHandler(session_id=session_id)
+        agent = create_pandas_dataframe_agent(
+            llm=llm,
+            df=df,
+            agent_type=AgentType.OPENAI_FUNCTIONS,
+            verbose=True,
+            handle_parsing_errors=True
+        )
+        try:
+            agent.invoke({"input": user_input}, config={"callbacks": [handler]})
+        except Exception as e:
+            STREAM_CACHE[session_id] += f"\n[ERROR]: {str(e)}"
+
+    import threading
+    threading.Thread(target=run_agent).start()
+
+    return False  # Enable Interval for streaming
+
+# Stream output updates
 @app.callback(
-    Output("modal-body", "children"),
-    Input("interval-component", "n_intervals"),
-    State("streaming-data", "data"),
+    Output("chat-log", "children"),
+    Output("stream-output", "children"),
+    Output("stream-update", "disabled"),
+    Input("stream-update", "n_intervals"),
+    State("session-id", "data"),
+    State("user-input", "value"),
+    prevent_initial_call=True
 )
-def update_modal_body(n_intervals, streaming_data):
-    if streaming_data:
-        response_tokens = streaming_data.get("tokens", [])
-        chart_data = streaming_data.get("chart_data")
+def update_stream(n, session_id, user_input):
+    text = STREAM_CACHE.get(session_id, "")
+    # Stop interval if stream is done
+    if text.endswith(('.', '\n')) and len(text) > 5:
+        return text, "", True
+    return text, text, False
 
-        if chart_data:
-            # Create and display the Plotly chart
-            try:
-                fig = px.bar(df, x=chart_data["x_col"], y=chart_data["y_col"], title=chart_data.get("title", "Bar Chart"))
-                return [html.Div("".join(response_tokens)), dcc.Graph(figure=fig)]
-            except KeyError:
-                return [html.Div("Error creating chart.")]
-        else:
-            # Display the streamed text response
-            return [html.Div("".join(response_tokens))]
-    return []
-
-# Run the app
-if __name__ == "__main__":
+if __name__ == '__main__':
     app.run_server(debug=True)
