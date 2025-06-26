@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.express as px
 import uuid
 import asyncio
+import threading
 
 from langchain.chat_models import ChatOpenAI
 from langchain.agents.agent_toolkits import create_pandas_dataframe_agent
@@ -12,14 +13,14 @@ from langchain.agents import Tool
 from langchain_core.messages import HumanMessage
 from langchain_core.callbacks import BaseCallbackHandler
 
-# Load CSV
+# === Load Titanic CSV ===
 df = pd.read_csv("titanic.csv")
 
-# Streaming text and plot state
+# === Global state ===
 streamed_content = {"text": ""}
 streamed_plot = {"fig": None}
 
-# Define a plotting tool
+# === Define plot generation tool ===
 def plot_chart(query: str):
     query = query.lower()
     if "age distribution" in query:
@@ -39,25 +40,25 @@ plot_tool = Tool(
     description="Generates plots like 'age distribution', 'survival by class', or 'fare vs age'."
 )
 
-# Setup LangChain agent
+# === Initialize LangChain agent ===
 llm = ChatOpenAI(model="gpt-4", temperature=0, streaming=True)
 agent = create_pandas_dataframe_agent(llm, df, extra_tools=[plot_tool], verbose=True)
 
-# Callback for streaming tokens
+# === Streaming handler ===
 class StreamingHandler(BaseCallbackHandler):
     def on_llm_new_token(self, token: str, **kwargs) -> None:
         streamed_content["text"] += token
 
-# Dash app
+# === Dash app ===
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-app.title = "Chatbot with Streaming + Plot"
+app.title = "Streaming Chatbot with Plotting"
 
 app.layout = html.Div([
     dbc.Button("Open Chatbot", id="open", n_clicks=0),
     dcc.Store(id="stream-update", data="", storage_type="memory"),
 
     dbc.Modal([
-        dbc.ModalHeader("Titanic Chatbot"),
+        dbc.ModalHeader("Titanic CSV Chatbot"),
         dbc.ModalBody([
             html.Div(id="chat-output", style={"whiteSpace": "pre-wrap", "minHeight": "200px"}),
             dcc.Input(id="user-input", type="text", placeholder="Ask a question...", className="form-control"),
@@ -68,7 +69,7 @@ app.layout = html.Div([
     ], id="modal", is_open=False),
 ])
 
-# Modal toggling
+# === Modal toggle ===
 @app.callback(
     Output("modal", "is_open", allow_duplicate=True),
     [Input("open", "n_clicks"), Input("close", "n_clicks")],
@@ -78,7 +79,7 @@ app.layout = html.Div([
 def toggle_modal(open_clicks, close_clicks, is_open):
     return not is_open if ctx.triggered_id in ["open", "close"] else is_open
 
-# Trigger agent and stream response (async)
+# === Run agent in background thread with asyncio loop ===
 @app.callback(
     Output("stream-update", "data", allow_duplicate=True),
     Input("send", "n_clicks"),
@@ -88,25 +89,22 @@ def toggle_modal(open_clicks, close_clicks, is_open):
 def trigger_agent(n, user_query):
     if not user_query:
         return ""
-    
+
     streamed_content["text"] = ""
     streamed_plot["fig"] = None
 
-    async def run_agent():
-        await agent.ainvoke(
+    def run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(agent.ainvoke(
             [HumanMessage(content=user_query)],
             config={"callbacks": [StreamingHandler()]}
-        )
+        ))
 
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        asyncio.ensure_future(run_agent())
-    else:
-        loop.run_until_complete(run_agent())
-
+    threading.Thread(target=run).start()
     return str(uuid.uuid4())
 
-# Display streaming text output
+# === Update text area with streamed content ===
 @app.callback(
     Output("chat-output", "children"),
     Input("stream-update", "data")
@@ -114,7 +112,7 @@ def trigger_agent(n, user_query):
 def update_output(_):
     return streamed_content["text"]
 
-# Display plot (if any)
+# === Update plot if any ===
 @app.callback(
     Output("chat-graph", "figure"),
     Output("chat-graph", "style"),
@@ -125,5 +123,6 @@ def update_plot(_):
         return streamed_plot["fig"], {"display": "block"}
     return {}, {"display": "none"}
 
+# === Run server ===
 if __name__ == "__main__":
     app.run_server(debug=True)
