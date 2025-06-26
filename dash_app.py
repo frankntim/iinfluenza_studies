@@ -6,6 +6,9 @@ import plotly.express as px
 import uuid
 import asyncio
 import threading
+import traceback
+import plotly.io as pio
+pio.renderers.default = "svg"  # prevent GUI renderer errors in threads
 
 from langchain.chat_models import ChatOpenAI
 from langchain.agents.agent_toolkits import create_pandas_dataframe_agent
@@ -21,7 +24,7 @@ streamed_tokens = []
 streamed_plot = {"fig": None}
 is_streaming = {"active": False}
 
-# === Define plot generation tool ===
+# === Plot generation tool ===
 def plot_chart(query: str):
     query = query.lower()
     if "age distribution" in query:
@@ -52,7 +55,7 @@ class StreamingHandler(BaseCallbackHandler):
 
 # === Dash App ===
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-app.title = "Streaming Chatbot with Persistent Scrollable Chat"
+app.title = "Streaming Chatbot with Charting"
 
 app.layout = html.Div([
     dbc.Button("Open Chatbot", id="open", n_clicks=0),
@@ -78,7 +81,7 @@ app.layout = html.Div([
     ], id="modal", is_open=False),
 ])
 
-# === Modal toggle ===
+# === Toggle modal open/close ===
 @app.callback(
     Output("modal", "is_open", allow_duplicate=True),
     [Input("open", "n_clicks"), Input("close", "n_clicks")],
@@ -100,27 +103,33 @@ def trigger_agent(n, user_query, history):
     if not user_query:
         return history
 
-    # Add user's question to chat log
+    # Add user message to chat
     history.append(f"👤: {user_query}")
     streamed_tokens.clear()
     streamed_plot["fig"] = None
     is_streaming["active"] = True
 
     def run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(agent.ainvoke(
-            [HumanMessage(content=user_query)],
-            config={"callbacks": [StreamingHandler()]}
-        ))
-        is_streaming["active"] = False
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(agent.ainvoke(
+                [HumanMessage(content=user_query)],
+                config={"callbacks": [StreamingHandler()]}
+            ))
+        except Exception as e:
+            error_msg = f"⚠️ Error:\n{traceback.format_exc()}"
+            streamed_tokens.append(error_msg)
+        finally:
+            is_streaming["active"] = False
 
     threading.Thread(target=run).start()
+
     # Add placeholder for streaming bot response
     history.append("🤖: ")
     return history
 
-# === Update chat and chart every 250ms ===
+# === Stream updates to UI ===
 @app.callback(
     Output("chat-output", "children"),
     Output("chat-graph", "figure"),
@@ -130,12 +139,16 @@ def trigger_agent(n, user_query, history):
     prevent_initial_call=True
 )
 def stream_to_output(_, chat_history):
-    # Update latest assistant response with streamed tokens
+    # Update latest assistant message with new streamed tokens
     if chat_history and chat_history[-1].startswith("🤖:"):
         chat_history[-1] = "🤖: " + "".join(streamed_tokens)
-    fig = streamed_plot["fig"]
-    return "\n".join(chat_history), fig if fig else {}, {"display": "block" if fig else "none"}
 
-# === Run app ===
+    fig = streamed_plot["fig"]
+    fig_out = fig if fig else dash.no_update
+    style_out = {"display": "block"} if fig else {"display": "none"}
+
+    return "\n".join(chat_history), fig_out, style_out
+
+# === Run the app ===
 if __name__ == "__main__":
     app.run_server(debug=True)
