@@ -16,9 +16,10 @@ from langchain_core.callbacks import BaseCallbackHandler
 # === Load Titanic CSV ===
 df = pd.read_csv("titanic.csv")
 
-# === Global state ===
-streamed_content = {"text": ""}
+# === Shared global state ===
+streamed_tokens = []  # live token buffer
 streamed_plot = {"fig": None}
+is_streaming = {"active": False}
 
 # === Define plot generation tool ===
 def plot_chart(query: str):
@@ -40,14 +41,14 @@ plot_tool = Tool(
     description="Generates plots like 'age distribution', 'survival by class', or 'fare vs age'."
 )
 
-# === Initialize LangChain agent ===
+# === LangChain Agent ===
 llm = ChatOpenAI(model="gpt-4", temperature=0, streaming=True)
 agent = create_pandas_dataframe_agent(llm, df, extra_tools=[plot_tool], verbose=True)
 
-# === Streaming handler ===
+# === Streaming callback ===
 class StreamingHandler(BaseCallbackHandler):
     def on_llm_new_token(self, token: str, **kwargs) -> None:
-        streamed_content["text"] += token
+        streamed_tokens.append(token)
 
 # === Dash app ===
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
@@ -55,7 +56,8 @@ app.title = "Streaming Chatbot with Plotting"
 
 app.layout = html.Div([
     dbc.Button("Open Chatbot", id="open", n_clicks=0),
-    dcc.Store(id="stream-update", data="", storage_type="memory"),
+    dcc.Store(id="chat-text", data=""),
+    dcc.Interval(id="poll-stream", interval=250, n_intervals=0),
 
     dbc.Modal([
         dbc.ModalHeader("Titanic CSV Chatbot"),
@@ -79,19 +81,19 @@ app.layout = html.Div([
 def toggle_modal(open_clicks, close_clicks, is_open):
     return not is_open if ctx.triggered_id in ["open", "close"] else is_open
 
-# === Run agent in background thread with asyncio loop ===
+# === Start streaming response ===
 @app.callback(
-    Output("stream-update", "data", allow_duplicate=True),
+    Output("chat-text", "data"),
     Input("send", "n_clicks"),
     State("user-input", "value"),
-    prevent_initial_call="initial_duplicate"
+    prevent_initial_call=True
 )
 def trigger_agent(n, user_query):
     if not user_query:
         return ""
-
-    streamed_content["text"] = ""
+    streamed_tokens.clear()
     streamed_plot["fig"] = None
+    is_streaming["active"] = True
 
     def run():
         loop = asyncio.new_event_loop()
@@ -100,29 +102,27 @@ def trigger_agent(n, user_query):
             [HumanMessage(content=user_query)],
             config={"callbacks": [StreamingHandler()]}
         ))
+        is_streaming["active"] = False
 
     threading.Thread(target=run).start()
-    return str(uuid.uuid4())
+    return ""  # Start from blank
 
-# === Update text area with streamed content ===
+# === Update chat output every 250ms ===
 @app.callback(
     Output("chat-output", "children"),
-    Input("stream-update", "data")
-)
-def update_output(_):
-    return streamed_content["text"]
-
-# === Update plot if any ===
-@app.callback(
     Output("chat-graph", "figure"),
     Output("chat-graph", "style"),
-    Input("stream-update", "data")
+    Input("poll-stream", "n_intervals"),
+    State("chat-text", "data"),
+    prevent_initial_call=True
 )
-def update_plot(_):
-    if streamed_plot["fig"]:
-        return streamed_plot["fig"], {"display": "block"}
-    return {}, {"display": "none"}
+def stream_to_output(_, current_text):
+    if streamed_tokens:
+        current_text += "".join(streamed_tokens)
+        streamed_tokens.clear()
+    fig = streamed_plot["fig"]
+    return current_text, fig if fig else {}, {"display": "block" if fig else "none"}
 
-# === Run server ===
+# === Run app ===
 if __name__ == "__main__":
     app.run_server(debug=True)
