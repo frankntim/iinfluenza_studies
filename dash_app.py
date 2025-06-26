@@ -1,147 +1,124 @@
 import dash
-from dash import html, dcc, Input, Output, State, ctx
+from dash import dcc, html, Input, Output, State, ctx
+import dash_bootstrap_components as dbc
 import pandas as pd
-import uuid
+import plotly.express as px
 import threading
-from langchain.agents.agent_types import AgentType
-from langchain.experimental.agents import create_pandas_dataframe_agent
-from langchain_openai import ChatOpenAI
-from langchain_core.callbacks import BaseCallbackHandler
-import plotly.graph_objects as go
+import uuid
 
-# Load Titanic data
+from langchain.chat_models import ChatOpenAI
+from langchain.agents.agent_toolkits import create_pandas_dataframe_agent
+from langchain.agents import Tool
+from langchain_core.messages import HumanMessage
+from langchain_core.runnables import Runnable
+from langchain_core.callbacks import BaseCallbackHandler
+
+# === Load CSV Data ===
 df = pd.read_csv("titanic.csv")
 
-# In-memory cache for text and figure
-STREAM_CACHE = {}  # {session_id: {"text": ..., "fig": go.Figure}}
+# === Global Store ===
+streamed_content = {"text": ""}
+streamed_plot = {"fig": None}
 
-# Streaming handler for Dash
-class DashStreamHandler(BaseCallbackHandler):
-    def __init__(self, session_id):
-        self.session_id = session_id
-        STREAM_CACHE[self.session_id] = {"text": "", "fig": None}
+# === Define Plot Tool ===
+def plot_chart(query: str):
+    # Simple keyword-based chart generation
+    if "age distribution" in query.lower():
+        fig = px.histogram(df, x="Age", nbins=30, title="Age Distribution")
+    elif "survival by class" in query.lower():
+        fig = px.histogram(df, x="Pclass", color="Survived", barmode="group", title="Survival by Passenger Class")
+    elif "fare vs age" in query.lower():
+        fig = px.scatter(df, x="Age", y="Fare", color="Survived", title="Fare vs Age")
+    else:
+        return "Sorry, I couldn't generate a chart for that."
+    streamed_plot["fig"] = fig
+    return "Here's the chart you requested."
 
-    def on_llm_new_token(self, token: str, **kwargs):
-        STREAM_CACHE[self.session_id]["text"] += token
+plot_tool = Tool(
+    name="ChartGenerator",
+    func=plot_chart,
+    description="Generates a plot based on Titanic data. Use keywords like 'age distribution', 'survival by class', or 'fare vs age'."
+)
 
-# LLM setup
+# === LLM and Agent ===
 llm = ChatOpenAI(model="gpt-4", temperature=0, streaming=True)
+agent = create_pandas_dataframe_agent(llm, df, extra_tools=[plot_tool], verbose=True)
 
-# Dash app
-app = dash.Dash(__name__)
-app.title = "Titanic Chatbot with Charts"
+# === Callback Streaming Handler ===
+class StreamingHandler(BaseCallbackHandler):
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        streamed_content["text"] += token
+
+# === Dash App ===
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app.title = "Dash Modal Chatbot with Charts"
 
 app.layout = html.Div([
-    html.Button("Open Chatbot", id="open-modal", n_clicks=0),
-    dcc.Store(id="session-id", data=str(uuid.uuid4())),
-    dcc.Interval(id="stream-update", interval=500, n_intervals=0, disabled=True),
-    html.Div(id="stream-output", style={"whiteSpace": "pre-wrap", "marginTop": "1rem"}),
+    dbc.Button("Open Chatbot", id="open", n_clicks=0),
+    dcc.Store(id="stream-update", data="", storage_type="memory"),
+    dcc.Graph(id="plot-output", style={"display": "none"}),  # Hidden unless chart exists
 
-    html.Div([
-        html.Div([
-            html.H2("Titanic Chatbot", style={"marginBottom": "10px"}),
-            dcc.Textarea(id="user-input", style={"width": "100%", "height": "100px"}, placeholder="Ask about the Titanic dataset..."),
-            html.Button("Send", id="send-btn", n_clicks=0),
-            html.Div(id="chat-log", style={"whiteSpace": "pre-wrap", "height": "200px", "overflowY": "auto", "marginTop": "1rem"}),
-            html.Div(id="plot-container", style={"marginTop": "1rem"}),  # Chart output
-            html.Button("Close", id="close-modal", n_clicks=0, style={"marginTop": "10px"}),
-        ], style={
-            "backgroundColor": "white",
-            "padding": "20px",
-            "borderRadius": "10px",
-            "width": "600px",
-            "maxWidth": "90%",
-            "boxShadow": "0 0 10px rgba(0, 0, 0, 0.2)"
-        }),
-    ], id="modal", style={
-        "display": "none",
-        "position": "fixed",
-        "top": 0, "left": 0, "right": 0, "bottom": 0,
-        "backgroundColor": "rgba(0, 0, 0, 0.5)",
-        "justifyContent": "center",
-        "alignItems": "center",
-        "zIndex": 1000,
-    })
+    dbc.Modal([
+        dbc.ModalHeader("Titanic CSV Chatbot"),
+        dbc.ModalBody([
+            html.Div(id="chat-output", style={"whiteSpace": "pre-wrap", "minHeight": "200px"}),
+            dcc.Input(id="user-input", type="text", placeholder="Ask a question...", className="form-control"),
+            dbc.Button("Send", id="send", n_clicks=0, color="primary", className="mt-2"),
+            dcc.Graph(id="chat-graph", style={"marginTop": "20px"})
+        ]),
+        dbc.ModalFooter(dbc.Button("Close", id="close", className="ms-auto", n_clicks=0)),
+    ], id="modal", is_open=False),
 ])
 
-# Open/close modal
+# === Modal Open/Close ===
 @app.callback(
-    Output("modal", "style"),
-    Input("open-modal", "n_clicks"),
-    Input("close-modal", "n_clicks"),
-    prevent_initial_call=True
+    Output("modal", "is_open", allow_duplicate=True),
+    [Input("open", "n_clicks"), Input("close", "n_clicks")],
+    [State("modal", "is_open")],
+    prevent_initial_call="initial_duplicate"
 )
-def toggle_modal(open_clicks, close_clicks):
-    if ctx.triggered_id == "open-modal":
-        return {"display": "flex", "position": "fixed", "top": 0, "left": 0, "right": 0, "bottom": 0,
-                "backgroundColor": "rgba(0, 0, 0, 0.5)", "justifyContent": "center", "alignItems": "center", "zIndex": 1000}
-    return {"display": "none"}
+def toggle_modal(open_clicks, close_clicks, is_open):
+    return not is_open if ctx.triggered_id in ["open", "close"] else is_open
 
-# Trigger LLM response
+# === Agent Trigger ===
 @app.callback(
-    Output("stream-update", "disabled", allow_duplicate=True),
-    Input("send-btn", "n_clicks"),
+    Output("stream-update", "data", allow_duplicate=True),
+    Input("send", "n_clicks"),
     State("user-input", "value"),
-    State("session-id", "data"),
-    prevent_initial_call=True
+    prevent_initial_call="initial_duplicate"
 )
-def send_query(n, user_input, session_id):
-    if not user_input:
-        return True
+def trigger_agent(n, user_query):
+    if not user_query:
+        return ""
+    streamed_content["text"] = ""
+    streamed_plot["fig"] = None
 
-    STREAM_CACHE[session_id] = {"text": "", "fig": None}
-
-    def run_agent():
-        handler = DashStreamHandler(session_id=session_id)
-
-        # Create agent
-        agent = create_pandas_dataframe_agent(
-            llm=llm,
-            df=df,
-            agent_type=AgentType.OPENAI_FUNCTIONS,
-            verbose=True,
-            handle_parsing_errors=True
+    def run():
+        agent.invoke(
+            [HumanMessage(content=user_query)],
+            config={"callbacks": [StreamingHandler()]}
         )
 
-        try:
-            # Let agent return chart and/or text
-            result = agent.invoke({"input": user_input}, config={"callbacks": [handler]})
+    threading.Thread(target=run).start()
+    return str(uuid.uuid4())
 
-            # Example structure if figure is returned
-            if isinstance(result, dict) and "fig" in result:
-                STREAM_CACHE[session_id]["fig"] = result["fig"]
-
-            # If agent just returns a figure
-            elif hasattr(result, "to_plotly_json"):  # plotly.graph_objs.Figure
-                STREAM_CACHE[session_id]["fig"] = result
-
-        except Exception as e:
-            STREAM_CACHE[session_id]["text"] += f"\n[ERROR]: {str(e)}"
-
-    threading.Thread(target=run_agent).start()
-    return False
-
-# Update streamed response and show chart
+# === Streaming Display ===
 @app.callback(
-    Output("chat-log", "children"),
-    Output("stream-output", "children"),
-    Output("stream-update", "disabled", allow_duplicate=True),
-    Output("plot-container", "children"),
-    Input("stream-update", "n_intervals"),
-    State("session-id", "data"),
-    State("user-input", "value"),
-    prevent_initial_call=True
+    Output("chat-output", "children"),
+    Input("stream-update", "data")
 )
-def update_stream(n, session_id, user_input):
-    cache = STREAM_CACHE.get(session_id, {"text": "", "fig": None})
-    text = cache["text"]
-    fig = cache["fig"]
-    chart_output = dcc.Graph(figure=fig) if fig else None
+def update_text(_):
+    return streamed_content["text"]
 
-    if text.endswith(('.', '\n')) and len(text) > 5:
-        return text, "", True, chart_output
+@app.callback(
+    Output("chat-graph", "figure"),
+    Output("chat-graph", "style"),
+    Input("stream-update", "data")
+)
+def update_plot(_):
+    if streamed_plot["fig"]:
+        return streamed_plot["fig"], {"display": "block"}
+    return {}, {"display": "none"}
 
-    return text, text, False, chart_output
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run_server(debug=True)
