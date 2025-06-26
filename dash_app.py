@@ -17,7 +17,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 df = pd.read_csv("titanic.csv")
 
 # === Shared global state ===
-streamed_tokens = []  # live token buffer
+streamed_tokens = []
 streamed_plot = {"fig": None}
 is_streaming = {"active": False}
 
@@ -45,24 +45,31 @@ plot_tool = Tool(
 llm = ChatOpenAI(model="gpt-4", temperature=0, streaming=True)
 agent = create_pandas_dataframe_agent(llm, df, extra_tools=[plot_tool], verbose=True)
 
-# === Streaming callback ===
+# === Token streaming handler ===
 class StreamingHandler(BaseCallbackHandler):
     def on_llm_new_token(self, token: str, **kwargs) -> None:
         streamed_tokens.append(token)
 
-# === Dash app ===
+# === Dash App ===
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-app.title = "Streaming Chatbot with Plotting"
+app.title = "Streaming Chatbot with Persistent Scrollable Chat"
 
 app.layout = html.Div([
     dbc.Button("Open Chatbot", id="open", n_clicks=0),
-    dcc.Store(id="chat-text", data=""),
+    dcc.Store(id="chat-text", data=[]),
     dcc.Interval(id="poll-stream", interval=250, n_intervals=0),
 
     dbc.Modal([
         dbc.ModalHeader("Titanic CSV Chatbot"),
         dbc.ModalBody([
-            html.Div(id="chat-output", style={"whiteSpace": "pre-wrap", "minHeight": "200px"}),
+            html.Div(id="chat-output", style={
+                "whiteSpace": "pre-wrap",
+                "overflowY": "scroll",
+                "maxHeight": "300px",
+                "border": "1px solid #ccc",
+                "padding": "10px",
+                "marginBottom": "10px"
+            }),
             dcc.Input(id="user-input", type="text", placeholder="Ask a question...", className="form-control"),
             dbc.Button("Send", id="send", n_clicks=0, color="primary", className="mt-2"),
             dcc.Graph(id="chat-graph", style={"marginTop": "20px"})
@@ -81,16 +88,20 @@ app.layout = html.Div([
 def toggle_modal(open_clicks, close_clicks, is_open):
     return not is_open if ctx.triggered_id in ["open", "close"] else is_open
 
-# === Start streaming response ===
+# === Trigger agent run ===
 @app.callback(
     Output("chat-text", "data"),
     Input("send", "n_clicks"),
     State("user-input", "value"),
+    State("chat-text", "data"),
     prevent_initial_call=True
 )
-def trigger_agent(n, user_query):
+def trigger_agent(n, user_query, history):
     if not user_query:
-        return ""
+        return history
+
+    # Add user's question to chat log
+    history.append(f"👤: {user_query}")
     streamed_tokens.clear()
     streamed_plot["fig"] = None
     is_streaming["active"] = True
@@ -105,9 +116,11 @@ def trigger_agent(n, user_query):
         is_streaming["active"] = False
 
     threading.Thread(target=run).start()
-    return ""  # Start from blank
+    # Add placeholder for streaming bot response
+    history.append("🤖: ")
+    return history
 
-# === Update chat output every 250ms ===
+# === Update chat and chart every 250ms ===
 @app.callback(
     Output("chat-output", "children"),
     Output("chat-graph", "figure"),
@@ -116,12 +129,12 @@ def trigger_agent(n, user_query):
     State("chat-text", "data"),
     prevent_initial_call=True
 )
-def stream_to_output(_, current_text):
-    if streamed_tokens:
-        current_text += "".join(streamed_tokens)
-        streamed_tokens.clear()
+def stream_to_output(_, chat_history):
+    # Update latest assistant response with streamed tokens
+    if chat_history and chat_history[-1].startswith("🤖:"):
+        chat_history[-1] = "🤖: " + "".join(streamed_tokens)
     fig = streamed_plot["fig"]
-    return current_text, fig if fig else {}, {"display": "block" if fig else "none"}
+    return "\n".join(chat_history), fig if fig else {}, {"display": "block" if fig else "none"}
 
 # === Run app ===
 if __name__ == "__main__":
