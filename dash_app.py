@@ -4,12 +4,11 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import uuid
 import asyncio
 import threading
 import traceback
 import plotly.io as pio
-from lifelines import KaplanMeierFitter
+from lifelines import KaplanMeierFitter, CoxPHFitter
 
 from langchain.chat_models import ChatOpenAI
 from langchain.agents.agent_toolkits import create_pandas_dataframe_agent
@@ -28,7 +27,7 @@ df = pd.read_csv("titanic.csv")
 df['Survived'] = df['Survived'].astype(int)
 df['Pclass'] = df['Pclass'].astype(str)
 
-# === Shared state ===
+# === Global shared state ===
 streamed_tokens = []
 streamed_plot = {"fig": None}
 is_streaming = {"active": False}
@@ -47,31 +46,27 @@ def plot_chart(query: str):
     streamed_plot["fig"] = fig
     return "Here's the chart you requested."
 
-# === KM plot with LLM parser ===
+# === KM plot tool using LLM column extraction ===
 class KMArgs(BaseModel):
-    time_column: str = Field(description="Time-to-event column")
-    event_column: str = Field(description="Event occurred (1) or censored (0)")
-    group_column: str = Field(default=None, description="Optional grouping column")
+    time_column: str
+    event_column: str
+    group_column: str = None
 
-parser = PydanticOutputParser(pydantic_object=KMArgs)
-
-prompt = PromptTemplate(
-    template="""
-You extract survival analysis parameters from a user query.
-Return JSON with: time_column, event_column, group_column (optional).
+parser_km = PydanticOutputParser(pydantic_object=KMArgs)
+prompt_km = PromptTemplate(
+    template="""Extract Kaplan-Meier arguments from user query as JSON: time_column, event_column, and optional group_column.
 
 Query: {query}
 {format_instructions}
 """,
     input_variables=["query"],
-    partial_variables={"format_instructions": parser.get_format_instructions()}
+    partial_variables={"format_instructions": parser_km.get_format_instructions()}
 )
-
-llm_chain = LLMChain(llm=ChatOpenAI(model="gpt-4", temperature=0), prompt=prompt)
+llm_chain_km = LLMChain(llm=ChatOpenAI(model="gpt-4", temperature=0), prompt=prompt_km)
 
 def km_survival_plot(query: str):
     try:
-        parsed = parser.parse(llm_chain.run(query))
+        parsed = parser_km.parse(llm_chain_km.run(query))
         T_col = parsed.time_column
         E_col = parsed.event_column
         group_col = parsed.group_column
@@ -79,78 +74,109 @@ def km_survival_plot(query: str):
         if T_col not in df.columns or E_col not in df.columns:
             return f"⚠️ Columns `{T_col}` or `{E_col}` not found."
 
-        T = df[T_col]
-        E = df[E_col]
         fig = go.Figure()
-
         if group_col and group_col in df.columns:
             for group, subdf in df.groupby(group_col):
                 kmf = KaplanMeierFitter()
-                kmf.fit(subdf[T_col], subdf[E_col], label=str(group))
-                fig.add_trace(go.Scatter(
-                    x=kmf.survival_function_.index,
-                    y=kmf.survival_function_[kmf._label],
-                    mode="lines", name=str(group)
-                ))
+                kmf.fit(subdf[T_col], event_observed=subdf[E_col], label=str(group))
+                fig.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_[kmf._label], mode="lines", name=str(group)))
             fig.update_layout(title=f"KM Curve by {group_col}", xaxis_title=T_col, yaxis_title="Survival Probability")
         else:
             kmf = KaplanMeierFitter()
-            kmf.fit(T, E, label="All")
-            fig.add_trace(go.Scatter(
-                x=kmf.survival_function_.index,
-                y=kmf.survival_function_["All"],
-                mode="lines", name="All"
-            ))
+            kmf.fit(df[T_col], event_observed=df[E_col], label="All")
+            fig.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_["All"], mode="lines", name="All"))
             fig.update_layout(title="Kaplan-Meier Curve", xaxis_title=T_col, yaxis_title="Survival Probability")
 
         streamed_plot["fig"] = fig
-        return f"Kaplan-Meier plot using `{T_col}` and `{E_col}`" + (f" grouped by `{group_col}`." if group_col else ".")
+        return "Kaplan-Meier plot generated."
     except Exception as e:
-        return f"❌ Failed to parse or plot: {e}"
+        return f"❌ KM Error: {e}"
+
+# === Cox PH plot using LLM ===
+class CoxArgs(BaseModel):
+    time_column: str
+    event_column: str
+    covariates: list[str]
+
+parser_cox = PydanticOutputParser(pydantic_object=CoxArgs)
+prompt_cox = PromptTemplate(
+    template="""Extract Cox regression inputs from this query.
+Return JSON: time_column, event_column, covariates (a list of strings).
+
+Query: {query}
+{format_instructions}
+""",
+    input_variables=["query"],
+    partial_variables={"format_instructions": parser_cox.get_format_instructions()}
+)
+llm_chain_cox = LLMChain(llm=ChatOpenAI(model="gpt-4", temperature=0), prompt=prompt_cox)
+
+def coxph_plot(query: str):
+    try:
+        args = parser_cox.parse(llm_chain_cox.run(query))
+        T_col = args.time_column
+        E_col = args.event_column
+        covs = args.covariates
+
+        for col in [T_col, E_col] + covs:
+            if col not in df.columns:
+                return f"⚠️ Column `{col}` not found."
+
+        df_cox = df[[T_col, E_col] + covs].dropna()
+        df_cox = pd.get_dummies(df_cox, drop_first=True)  # handle categorical
+
+        cph = CoxPHFitter()
+        cph.fit(df_cox, duration_col=T_col, event_col=E_col)
+
+        fig = go.Figure()
+        summary = cph.summary.reset_index()
+        for i, row in summary.iterrows():
+            fig.add_trace(go.Bar(
+                x=[row["coef"]],
+                y=[row["index"]],
+                orientation='h',
+                error_x=dict(type='data', array=[row["se(coef)"]]),
+                name=row["index"]
+            ))
+
+        fig.update_layout(title="CoxPH Coefficients", xaxis_title="Coefficient", yaxis_title="Covariate")
+        streamed_plot["fig"] = fig
+        return "Cox model fitted and coefficients plotted."
+    except Exception as e:
+        return f"❌ CoxPH Error: {e}"
 
 # === LangChain tools ===
-plot_tool = Tool(
-    name="ChartGenerator",
-    func=plot_chart,
-    description="Generates plots like age distribution, fare vs age, or survival by class."
-)
+tools = [
+    Tool(name="ChartGenerator", func=plot_chart, description="Basic charts like age distribution, fare vs age, etc."),
+    Tool(name="KaplanMeierPlot", func=km_survival_plot, description="Kaplan-Meier plots with time/event/group."),
+    Tool(name="CoxPHFitter", func=coxph_plot, description="Cox regression. Provide time, event, and covariates list.")
+]
 
-km_tool = Tool(
-    name="KaplanMeierPlot",
-    func=km_survival_plot,
-    description="Generate Kaplan-Meier survival plots. Mention time and event columns, and optionally group by a column."
-)
+llm_stream = ChatOpenAI(model="gpt-4", temperature=0, streaming=True)
+agent = create_pandas_dataframe_agent(llm_stream, df, extra_tools=tools, verbose=True)
 
-# === LangChain Agent ===
-llm = ChatOpenAI(model="gpt-4", temperature=0, streaming=True)
-agent = create_pandas_dataframe_agent(llm, df, extra_tools=[plot_tool, km_tool], verbose=True)
-
-# === Streaming callback ===
 class StreamingHandler(BaseCallbackHandler):
     def on_llm_new_token(self, token: str, **kwargs) -> None:
         streamed_tokens.append(token)
 
-# === Dash app ===
+# === Dash App ===
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-app.title = "Streaming Chatbot with KM Plots"
+app.title = "Chatbot: KM + CoxPH"
 
 app.layout = html.Div([
     dbc.Button("Open Chatbot", id="open", n_clicks=0),
     dcc.Store(id="chat-text", data=[]),
     dcc.Interval(id="poll-stream", interval=250, n_intervals=0),
-
     dbc.Modal([
-        dbc.ModalHeader("Titanic CSV Chatbot"),
+        dbc.ModalHeader("Titanic Chatbot"),
         dbc.ModalBody([
             html.Div(id="chat-output", style={
                 "whiteSpace": "pre-wrap",
                 "overflowY": "scroll",
                 "maxHeight": "300px",
-                "border": "1px solid #ccc",
-                "padding": "10px",
-                "marginBottom": "10px"
+                "border": "1px solid #ccc", "padding": "10px", "marginBottom": "10px"
             }),
-            dcc.Input(id="user-input", type="text", placeholder="Ask a question...", className="form-control"),
+            dcc.Input(id="user-input", type="text", placeholder="Ask something...", className="form-control"),
             dbc.Button("Send", id="send", n_clicks=0, color="primary", className="mt-2"),
             dcc.Graph(id="chat-graph", style={"marginTop": "20px"})
         ]),
@@ -158,7 +184,6 @@ app.layout = html.Div([
     ], id="modal", is_open=False),
 ])
 
-# === Toggle modal ===
 @app.callback(
     Output("modal", "is_open", allow_duplicate=True),
     [Input("open", "n_clicks"), Input("close", "n_clicks")],
@@ -168,7 +193,6 @@ app.layout = html.Div([
 def toggle_modal(open_clicks, close_clicks, is_open):
     return not is_open if ctx.triggered_id in ["open", "close"] else is_open
 
-# === Agent trigger ===
 @app.callback(
     Output("chat-text", "data"),
     Input("send", "n_clicks"),
@@ -179,7 +203,6 @@ def toggle_modal(open_clicks, close_clicks, is_open):
 def trigger_agent(n, user_query, history):
     if not user_query:
         return history
-
     history.append(f"👤: {user_query}")
     streamed_tokens.clear()
     streamed_plot["fig"] = None
@@ -202,7 +225,6 @@ def trigger_agent(n, user_query, history):
     history.append("🤖: ")
     return history
 
-# === Stream updates ===
 @app.callback(
     Output("chat-output", "children"),
     Output("chat-graph", "figure"),
@@ -218,6 +240,5 @@ def stream_to_output(_, chat_history):
     fig = streamed_plot["fig"]
     return "\n".join(chat_history), fig if fig else dash.no_update, {"display": "block"} if fig else {"display": "none"}
 
-# === Run app ===
 if __name__ == "__main__":
     app.run_server(debug=True)
