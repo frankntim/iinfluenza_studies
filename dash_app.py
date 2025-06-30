@@ -186,6 +186,7 @@ def logrank_comparison(query: str):
 
 
 # === Linear Mixed Model tool ===
+f# === Linear Mixed Model tool ===
 from statsmodels.formula.api import mixedlm
 import plotly.express as px
 import plotly.graph_objects as go
@@ -224,22 +225,27 @@ def lmm_fit(query: str):
         streamed_table["html"] = summary_df.round(3).to_dict("records")
         streamed_table["columns"] = [{"name": col, "id": col} for col in summary_df.columns]
 
-        # Plot: individual trajectories colored by group
-        fig = px.line(dff, x=t, y=y, color=subj, line_group=subj, hover_name=subj, 
-                      line_shape="linear", facet_col=g, title="Individual Trajectories by Group")
-        fig.update_traces(line=dict(width=1), showlegend=False)
-
-        # Add smoothed trend lines (fixed effects) by group
+        # Plot only smoothed trend lines (fixed effects) by group with confidence intervals
         dff_sorted = dff.sort_values(by=[g, t])
-        group_means = dff_sorted.groupby([g, t])[y].mean().reset_index()
-        for grp in group_means[g].unique():
-            group_df = group_means[group_means[g] == grp]
-            fig.add_trace(go.Scatter(x=group_df[t], y=group_df[y], mode='lines',
-                                     name=f"Mean Trend - {grp}", line=dict(width=3)))
+        group_stats = dff_sorted.groupby([g, t])[y].agg(["mean", "sem"]).reset_index()
+        group_stats["lower"] = group_stats["mean"] - 1.96 * group_stats["sem"]
+        group_stats["upper"] = group_stats["mean"] + 1.96 * group_stats["sem"]
 
+        fig = go.Figure()
+        for grp in group_stats[g].unique():
+            group_df = group_stats[group_stats[g] == grp]
+            fig.add_trace(go.Scatter(x=group_df[t], y=group_df["mean"], mode='lines',
+                                     name=f"Mean Trend - {grp}", line=dict(width=3)))
+            fig.add_trace(go.Scatter(x=list(group_df[t]) + list(group_df[t])[::-1],
+                                     y=list(group_df["upper"]) + list(group_df["lower"])[::-1],
+                                     fill='toself', fillcolor='rgba(0,100,80,0.2)',
+                                     line=dict(color='rgba(255,255,255,0)'),
+                                     hoverinfo="skip", showlegend=False))
+
+        fig.update_layout(title="Fixed Effect Trends with Confidence Intervals", xaxis_title=t, yaxis_title=y)
         streamed_plot["fig"] = fig
 
-        return "Linear mixed model fitted. Summary, individual trajectories, and fixed effect trends shown below."
+        return "Linear mixed model fitted. Summary and fixed effect trends shown below."
     except Exception as e:
         return f"❌ LMM Error: {e}"
 # === Tools ===
