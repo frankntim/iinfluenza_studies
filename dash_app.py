@@ -9,6 +9,9 @@ import threading
 import traceback
 import plotly.io as pio
 from lifelines import KaplanMeierFitter, CoxPHFitter
+from lifelines.statistics import logrank_test
+from statsmodels.formula.api import mixedlm
+
 
 from langchain.chat_models import ChatOpenAI
 from langchain.agents.agent_toolkits import create_pandas_dataframe_agent
@@ -136,11 +139,96 @@ def coxph_plot(query: str):
     except Exception as e:
         return f"❌ CoxPH Error: {e}"
 
+
+class LogRankArgs(BaseModel):
+    time_column: str
+    event_column: str
+    group_column: str
+
+parser_logrank = PydanticOutputParser(pydantic_object=LogRankArgs)
+prompt_logrank = PromptTemplate(
+    template="""Extract log-rank test arguments from this query: time_column, event_column, group_column.
+
+Query: {query}
+{format_instructions}
+""",
+    input_variables=["query"],
+    partial_variables={"format_instructions": parser_logrank.get_format_instructions()}
+)
+llm_chain_logrank = LLMChain(llm=ChatOpenAI(model="gpt-4", temperature=0), prompt=prompt_logrank)
+
+
+def logrank_comparison(query: str):
+    try:
+        args = parser_logrank.parse(llm_chain_logrank.run(query))
+        T_col, E_col, G_col = args.time_column, args.event_column, args.group_column
+        if not all(col in df.columns for col in [T_col, E_col, G_col]):
+            return f"⚠️ One or more columns not found: {T_col}, {E_col}, {G_col}"
+        unique_groups = df[G_col].dropna().unique()
+        if len(unique_groups) != 2:
+            return "⚠️ Log-rank test only supports exactly two groups."
+        group1, group2 = unique_groups[:2]
+        data1 = df[df[G_col] == group1][[T_col, E_col]].dropna()
+        data2 = df[df[G_col] == group2][[T_col, E_col]].dropna()
+        result = logrank_test(data1[T_col], data2[T_col], event_observed_A=data1[E_col], event_observed_B=data2[E_col])
+        pval = result.p_value
+        streamed_plot["fig"] = None
+        streamed_table["html"] = [{"Group 1": group1, "Group 2": group2, "p-value": round(pval, 4)}]
+        streamed_table["columns"] = [
+            {"name": "Group 1", "id": "Group 1"},
+            {"name": "Group 2", "id": "Group 2"},
+            {"name": "p-value", "id": "p-value"}
+        ]
+        return f"Log-rank test completed between {group1} and {group2}."
+    except Exception as e:
+        return f"❌ Log-rank test error: {e}"
+
+
+
+class LMMArgs(BaseModel):
+    response: str
+    time: str
+    group: str
+    subject_id: str
+
+parser_lmm = PydanticOutputParser(pydantic_object=LMMArgs)
+prompt_lmm = PromptTemplate(
+    template="""Extract the response, time variable, group variable, and subject_id for a linear mixed effects model.
+
+Query: {query}
+{format_instructions}
+""",
+    input_variables=["query"],
+    partial_variables={"format_instructions": parser_lmm.get_format_instructions()}
+)
+llm_chain_lmm = LLMChain(llm=ChatOpenAI(model="gpt-4", temperature=0), prompt=prompt_lmm)
+
+def lmm_fit(query: str):
+    try:
+        args = parser_lmm.parse(llm_chain_lmm.run(query))
+        y, t, g, subj = args.response, args.time, args.group, args.subject_id
+        for col in [y, t, g, subj]:
+            if col not in df.columns:
+                return f"⚠️ Column `{col}` not found."
+        dff = df[[y, t, g, subj]].dropna()
+        dff["interaction"] = dff[t].astype(float) * dff[g].astype("category").cat.codes
+        model = mixedlm(f"{y} ~ {t} + {g} + interaction", dff, groups=dff[subj])
+        result = model.fit()
+        summary_df = result.summary().tables[1]
+        summary_df.columns = summary_df.columns.str.strip()
+        streamed_table["html"] = summary_df.round(3).to_dict("records")
+        streamed_table["columns"] = [{"name": col, "id": col} for col in summary_df.columns]
+        streamed_plot["fig"] = None
+        return "Linear mixed model fitted and summary table shown below."
+    except Exception as e:
+        return f"❌ LMM Error: {e}"
 # === Tools ===
 tools = [
     Tool(name="ChartGenerator", func=plot_chart, description="Basic charts like age distribution, fare vs age, etc."),
     Tool(name="KaplanMeierPlot", func=km_survival_plot, description="Kaplan-Meier plots with time/event/group."),
-    Tool(name="CoxPHFitter", func=coxph_plot, description="Cox regression with time/event/covariates.")
+    Tool(name="CoxPHFitter", func=coxph_plot, description="Cox regression with time/event/covariates."),
+    Tool(name="LogRankTest", func=logrank_comparison, description="Compare two survival groups using the log-rank test."),
+    Tool(name="LinearMixedModel", func=lmm_fit, description="Fit a linear mixed effects model with time, group, and subject ID.")
 ]
 
 llm_stream = ChatOpenAI(model="gpt-4", temperature=0, streaming=True)
