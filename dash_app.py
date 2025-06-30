@@ -185,6 +185,11 @@ def logrank_comparison(query: str):
 
 
 
+# === Linear Mixed Model tool ===
+from statsmodels.formula.api import mixedlm
+import plotly.express as px
+import plotly.graph_objects as go
+
 class LMMArgs(BaseModel):
     response: str
     time: str
@@ -218,8 +223,23 @@ def lmm_fit(query: str):
         summary_df.columns = summary_df.columns.str.strip()
         streamed_table["html"] = summary_df.round(3).to_dict("records")
         streamed_table["columns"] = [{"name": col, "id": col} for col in summary_df.columns]
-        streamed_plot["fig"] = None
-        return "Linear mixed model fitted and summary table shown below."
+
+        # Plot: individual trajectories colored by group
+        fig = px.line(dff, x=t, y=y, color=subj, line_group=subj, hover_name=subj, 
+                      line_shape="linear", facet_col=g, title="Individual Trajectories by Group")
+        fig.update_traces(line=dict(width=1), showlegend=False)
+
+        # Add smoothed trend lines (fixed effects) by group
+        dff_sorted = dff.sort_values(by=[g, t])
+        group_means = dff_sorted.groupby([g, t])[y].mean().reset_index()
+        for grp in group_means[g].unique():
+            group_df = group_means[group_means[g] == grp]
+            fig.add_trace(go.Scatter(x=group_df[t], y=group_df[y], mode='lines',
+                                     name=f"Mean Trend - {grp}", line=dict(width=3)))
+
+        streamed_plot["fig"] = fig
+
+        return "Linear mixed model fitted. Summary, individual trajectories, and fixed effect trends shown below."
     except Exception as e:
         return f"❌ LMM Error: {e}"
 # === Tools ===
