@@ -1,104 +1,3 @@
-class KMArgs(BaseModel):
-    time_column: str
-    event_column: str
-    group_column: str = None
-
-def km_survival_plot(query: str):
-    try:
-        llm_agent = create_pandas_dataframe_agent(ChatOpenAI(model="gpt-4", temperature=0), df, verbose=False)
-        instruction = f"""
-        From this dataset, extract the time_column, event_column, and optional group_column for Kaplan-Meier analysis.
-        User Query: {query}
-        Respond with a JSON object like this:
-        {{"time_column": ..., "event_column": ..., "group_column": ...}}. If no group column is mentioned, set it to null.
-        """
-        json_response = llm_agent.invoke(instruction)
-        if isinstance(json_response, str):
-            import json
-            parsed = KMArgs(**json.loads(json_response))
-        else:
-            parsed = KMArgs(**json_response)
-
-        T_col = parsed.time_column
-        E_col = parsed.event_column
-        group_col = parsed.group_column
-
-        if T_col not in df.columns or E_col not in df.columns:
-            return f"⚠️ Columns `{T_col}` or `{E_col}` not found."
-
-        fig = go.Figure()
-        if group_col and group_col in df.columns:
-            for group, subdf in df.groupby(group_col):
-                kmf = KaplanMeierFitter()
-                kmf.fit(subdf[T_col], event_observed=subdf[E_col], label=str(group))
-                fig.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_[kmf._label], mode="lines", name=str(group)))
-            fig.update_layout(title=f"KM Curve by {group_col}", xaxis_title=T_col, yaxis_title="Survival Probability")
-        else:
-            kmf = KaplanMeierFitter()
-            kmf.fit(df[T_col], event_observed=df[E_col], label="All")
-            fig.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_["All"], mode="lines", name="All"))
-            fig.update_layout(title="Kaplan-Meier Curve", xaxis_title=T_col, yaxis_title="Survival Probability")
-
-        streamed_plot["fig"] = fig
-        return "Kaplan-Meier plot generated."
-    except Exception as e:
-        return f"❌ KM Error: {e}"
-
-
-
-class CoxArgs(BaseModel):
-    time_column: str
-    event_column: str
-    covariates: list[str]
-
-def coxph_plot(query: str):
-    try:
-        llm_agent = create_pandas_dataframe_agent(ChatOpenAI(model="gpt-4", temperature=0), df, verbose=False)
-        instruction = f"""
-        From this dataset, extract the time_column, event_column, and covariates list for Cox Proportional Hazards modeling.
-        User Query: {query}
-        Respond with a JSON object like this:
-        {{"time_column": ..., "event_column": ..., "covariates": [...]}}
-        """
-        import json
-        json_response = llm_agent.invoke(instruction)
-        if isinstance(json_response, str):
-            args = CoxArgs(**json.loads(json_response))
-        else:
-            args = CoxArgs(**json_response)
-        T_col = args.time_column
-        E_col = args.event_column
-        covs = args.covariates
-
-        for col in [T_col, E_col] + covs:
-            if col not in df.columns:
-                return f"⚠️ Column `{col}` not found."
-
-        df_cox = df[[T_col, E_col] + covs].dropna()
-        df_cox = pd.get_dummies(df_cox, drop_first=True)  # handle categorical
-
-        cph = CoxPHFitter()
-        cph.fit(df_cox, duration_col=T_col, event_col=E_col)
-
-        fig = go.Figure()
-        summary = cph.summary.reset_index()
-        for i, row in summary.iterrows():
-            fig.add_trace(go.Bar(
-                x=[row["coef"]],
-                y=[row["index"]],
-                orientation='h',
-                error_x=dict(type='data', array=[row["se(coef)"]]),
-                name=row["index"]
-            ))
-
-        fig.update_layout(title="CoxPH Coefficients", xaxis_title="Coefficient", yaxis_title="Covariate")
-        streamed_plot["fig"] = fig
-        return "Cox model fitted and coefficients plotted."
-    except Exception as e:
-        return f"❌ CoxPH Error: {e}"
-
-
-
 from lifelines.statistics import logrank_test
 
 class LogRankArgs(BaseModel):
@@ -108,7 +7,24 @@ class LogRankArgs(BaseModel):
 
 def logrank_comparison(query: str):
     try:
-        llm_agent = create_pandas_dataframe_agent(ChatOpenAI(model="gpt-4", temperature=0), df, verbose=False)
+        from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+
+llm = ChatOpenAI(model="gpt-4", temperature=0)
+
+extract_prompt_logrank = PromptTemplate(
+    template="""From the query below, extract and return a JSON with the keys: time_column, event_column, group_column.
+Only use column names from this dataset: {columns}
+Query: {query}
+""",
+    input_variables=["columns", "query"]
+)
+llm_chain_logrank = LLMChain(llm=llm, prompt=extract_prompt_logrank)
+
+columns = list(df.columns)
+llm_response = llm_chain_logrank.invoke({"columns": ", ".join(columns), "query": query})
+import json
+json_response = llm_response if isinstance(llm_response, dict) else json.loads(llm_response)
         instruction = f"""
         From this dataset, extract the time_column, event_column, and group_column for log-rank test.
         User Query: {query}
@@ -153,7 +69,19 @@ class LMMArgs(BaseModel):
 
 def lmm_plot(query: str):
     try:
-        llm_agent = create_pandas_dataframe_agent(ChatOpenAI(model="gpt-4", temperature=0), df, verbose=False)
+        extract_prompt_lmm = PromptTemplate(
+    template="""From the query below, extract and return a JSON with the keys: response, time_column, group_column, subject_column.
+Only use column names from this dataset: {columns}
+Query: {query}
+""",
+    input_variables=["columns", "query"]
+)
+llm_chain_lmm = LLMChain(llm=llm, prompt=extract_prompt_lmm)
+
+columns = list(df.columns)
+llm_response = llm_chain_lmm.invoke({"columns": ", ".join(columns), "query": query})
+import json
+json_response = llm_response if isinstance(llm_response, dict) else json.loads(llm_response)
         instruction = f"""
         From this dataset, extract the response, time_column, group_column, and subject_column for linear mixed model analysis.
         User Query: {query}
