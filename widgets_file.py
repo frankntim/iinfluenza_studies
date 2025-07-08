@@ -17,7 +17,7 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
     state.agent = None
     state.df = None
 
-    # Background image (if provided)
+    # Background image
     if background_image_file and os.path.exists(background_image_file):
         with open(background_image_file, "rb") as f:
             encoded = base64.b64encode(f.read()).decode("utf-8")
@@ -39,7 +39,7 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
             </style>
         """))
 
-    # Header image (if provided)
+    # Optional header image
     header_image_widget = None
     if header_image_file and os.path.exists(header_image_file):
         with open(header_image_file, "rb") as f:
@@ -51,7 +51,15 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
             layout=widgets.Layout(width='90%', height='80px')
         )
 
-    # Title box (styled)
+    # 🔷 Top "Survival Analysis" Button
+    analysis_button = widgets.Button(
+        description="Survival Analysis",
+        disabled=True,
+        layout=widgets.Layout(width='90%', height='80px')
+    )
+    analysis_button.add_class("flat-analysis-button")
+
+    # 🔷 Title Box
     title_box = widgets.Textarea(
         value='Survival - Cox-Mixed Model',
         disabled=True,
@@ -60,9 +68,18 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
     )
     title_box.add_class("title-box-style")
 
-    # Title styling
+    # 🔷 Style for button and title box
     display(HTML("""
         <style>
+            .flat-analysis-button button {
+                background-color: #ADD8E6 !important;
+                color: black !important;
+                font-weight: bold;
+                font-size: 18px;
+                border: none !important;
+                box-shadow: none !important;
+                cursor: default !important;
+            }
             .title-box-style textarea {
                 background-color: gray !important;
                 color: white !important;
@@ -90,7 +107,7 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
     )
     output_area = widgets.Output(layout=widgets.Layout(border='1px solid gray', padding='10px'))
 
-    # Upload handler
+    # Upload logic
     def handle_upload(change):
         output_area.clear_output()
         if upload_widget.value:
@@ -111,7 +128,7 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
 
     upload_widget.observe(handle_upload, names='value')
 
-    # Submit handler
+    # Submit logic
     def on_submit_click(b):
         output_area.clear_output()
 
@@ -137,17 +154,19 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
 
     submit_button.on_click(on_submit_click)
 
-    # Build UI
+    # UI layout
     elements = []
     if header_image_widget:
         elements.append(header_image_widget)
     elements += [
+        analysis_button,
         title_box,
         upload_widget,
         chat_box,
         submit_button,
         output_area
     ]
+
     container = widgets.VBox(elements)
 
     if background_image_file:
