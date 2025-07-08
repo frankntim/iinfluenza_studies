@@ -1,160 +1,138 @@
-# Databricks ipywidgets notebook: Data Catalog & Table Explorer
+"""
+Databricks Catalog Browser (ipywidgets)
 
-# COMMAND ----------
-# MAGIC %md
-# # Data Catalog & Table Explorer
-# This notebook provides an interactive UI (powered by `ipywidgets`) to browse Unity Catalog catalogs, schemas, and tables, and to run ad‑hoc SQL queries directly from a Databricks notebook.
+A reusable Python module that spins up an interactive Unity Catalog explorer inside a Databricks notebook.
 
-# COMMAND ----------
-# Install ipywidgets if needed (Databricks Runtime 14+ comes with it)
-# Uncomment the line below if ipywidgets is missing in your cluster environment
-# %pip install --quiet ipywidgets
+Quick start (**notebook cell**):
 
-# COMMAND ----------
+```python
+# (1) Ensure the script is on DBFS or workspace, then load it
+%run ./databricks_catalog_browser.py  # path may vary
+
+# (2) Launch the UI
+import databricks_catalog_browser as dcb
+
+dcb.launch_catalog_browser()  # optional: default_limit=50
+```
+
+Features
+--------
+* Navigate **catalog → schema → table** via dropdowns.
+* Select **multiple tables** at once.
+* **Ad‑hoc SQL textarea**: write any query.
+* Adjustable **row‑limit control**.
+* Results shown inline with `display()`.
+
+Requirements: Databricks Runtime 14.x + and `ipywidgets` (pre‑installed on DBR 14 +). Works in classic and Jupyter‑compatible Databricks notebooks.
+"""
+from __future__ import annotations
+
 import ipywidgets as widgets
 from IPython.display import display, clear_output
 from pyspark.sql import SparkSession
 
-spark = SparkSession.builder.getOrCreate()
+__all__ = ["launch_catalog_browser"]
 
 # -----------------------------------------------------------------------------
-# Helper functions
+# Spark session helper                                                          
 # -----------------------------------------------------------------------------
 
-def list_catalogs() -> list[str]:
-    """Return a list of catalog names visible to the current user."""
-    return [row.catalog_name for row in spark.sql("SHOW CATALOGS").collect()]
+def _spark() -> SparkSession:
+    """Get (or create) the active SparkSession."""
+    return SparkSession.builder.getOrCreate()
 
-
-def list_schemas(catalog: str) -> list[str]:
-    """Return a list of schemas/databases for a given catalog."""
-    return [row.databaseName for row in spark.sql(f"SHOW SCHEMAS IN {catalog}").collect()]
-
-
-def list_tables(catalog: str, schema: str) -> list[str]:
-    """Return a list of tables for a given catalog & schema."""
-    rows = spark.sql(f"SHOW TABLES IN {catalog}.{schema}").collect()
-    return [row.tableName for row in rows]
 
 # -----------------------------------------------------------------------------
-# Widgets definitions
+# Metadata fetchers                                                             
 # -----------------------------------------------------------------------------
 
-catalog_dropdown = widgets.Dropdown(
-    options=list_catalogs(),
-    description="Catalog:",
-    layout=widgets.Layout(width="300px"),
-)
+def _list_catalogs() -> list[str]:
+    return [r.catalog_name for r in _spark().sql("SHOW CATALOGS").collect()]
 
-schema_dropdown = widgets.Dropdown(
-    options=[],
-    description="Schema:",
-    layout=widgets.Layout(width="300px"),
-)
 
-tables_select = widgets.SelectMultiple(
-    options=[],
-    description="Tables:",
-    rows=8,
-    layout=widgets.Layout(width="300px"),
-)
+def _list_schemas(catalog: str) -> list[str]:
+    return [r.databaseName for r in _spark().sql(f"SHOW SCHEMAS IN {catalog}").collect()]
 
-limit_int = widgets.BoundedIntText(
-    value=20,
-    min=1,
-    max=10000,
-    step=1,
-    description="Show rows:",
-    layout=widgets.Layout(width="200px"),
-)
 
-run_button = widgets.Button(
-    description="Run Query",
-    button_style="success",
-    tooltip="Run the generated query and display the result",
-)
+def _list_tables(catalog: str, schema: str) -> list[str]:
+    rows = _spark().sql(f"SHOW TABLES IN {catalog}.{schema}").collect()
+    return [r.tableName for r in rows]
 
-custom_sql = widgets.Textarea(
-    placeholder="Or write your own SQL here…",
-    description="SQL:",
-    layout=widgets.Layout(width="600px", height="120px"),
-)
-
-output = widgets.Output()
 
 # -----------------------------------------------------------------------------
-# Callback functions
+# UI builder                                                                    
 # -----------------------------------------------------------------------------
 
-def on_catalog_change(change):
-    catalog = change["new"]
-    schema_dropdown.options = list_schemas(catalog)
-    # Automatically trigger schema update for the first schema in list
-    if schema_dropdown.options:
-        schema_dropdown.value = schema_dropdown.options[0]
+def _build_ui(default_limit: int = 20) -> widgets.VBox:
+    """Create and wire up ipywidgets components."""
 
+    # --- widgets ---
+    catalog_dd = widgets.Dropdown(options=_list_catalogs(), description="Catalog:", layout=widgets.Layout(width="300px"))
+    schema_dd = widgets.Dropdown(options=[], description="Schema:", layout=widgets.Layout(width="300px"))
+    table_sel = widgets.SelectMultiple(options=[], description="Tables:", rows=8, layout=widgets.Layout(width="300px"))
+    limit_int = widgets.BoundedIntText(value=default_limit, min=1, max=10000, description="Rows:", layout=widgets.Layout(width="200px"))
+    run_btn = widgets.Button(description="Run Query", button_style="success")
+    sql_box = widgets.Textarea(placeholder="Or write your own SQL here …", description="SQL:", layout=widgets.Layout(width="600px", height="120px"))
+    out = widgets.Output()
 
-def on_schema_change(change):
-    catalog = catalog_dropdown.value
-    schema = change["new"]
-    tables_select.options = list_tables(catalog, schema)
+    # --- callbacks ---
+    def _on_catalog(change):
+        catalog = change["new"]
+        schema_dd.options = _list_schemas(catalog)
+        if schema_dd.options:
+            schema_dd.value = schema_dd.options[0]
 
+    def _on_schema(change):
+        catalog = catalog_dd.value
+        schema = change["new"]
+        table_sel.options = _list_tables(catalog, schema)
 
-def run_query(_):
-    with output:
-        clear_output()
-        if custom_sql.value.strip():
-            sql = custom_sql.value.strip()
-            print("Running custom SQL:")
-            print(sql)
-        else:
-            selected = list(tables_select.value)
-            if not selected:
-                print("⚠️ Please select at least one table or write custom SQL.")
-                return
-            catalog = catalog_dropdown.value
-            schema = schema_dropdown.value
-            table_refs = [f"{catalog}.{schema}.{t}" for t in selected]
-            sql = "SELECT * FROM " + ", ".join(table_refs) + f" LIMIT {limit_int.value}"
-            print("Running generated SQL:")
-            print(sql)
-        try:
-            df = spark.sql(sql)
-            display(df.limit(limit_int.value).toPandas())
-        except Exception as e:
-            print("Query failed:", e)
+    def _run_query(_):
+        with out:
+            clear_output()
+            sql = sql_box.value.strip()
+            if not sql:
+                if not table_sel.value:
+                    print("⚠️ Select at least one table or type custom SQL.")
+                    return
+                refs = [f"{catalog_dd.value}.{schema_dd.value}.{t}" for t in table_sel.value]
+                sql = "SELECT * FROM " + ", ".join(refs) + f" LIMIT {limit_int.value}"
+            print("Executing:\n", sql)
+            try:
+                pdf = _spark().sql(sql).limit(limit_int.value).toPandas()
+                display(pdf)
+            except Exception as exc:
+                print("Query failed:", exc)
+
+    # wire observers
+    catalog_dd.observe(_on_catalog, names="value")
+    schema_dd.observe(_on_schema, names="value")
+    run_btn.on_click(_run_query)
+
+    # initial populate
+    _on_catalog({"new": catalog_dd.value})
+
+    # layout
+    return widgets.VBox([
+        widgets.HBox([catalog_dd, schema_dd]),
+        widgets.HBox([table_sel, widgets.VBox([limit_int, run_btn])]),
+        sql_box,
+        out,
+    ])
+
 
 # -----------------------------------------------------------------------------
-# Widget event bindings
+# Public API                                                                    
 # -----------------------------------------------------------------------------
 
-catalog_dropdown.observe(on_catalog_change, names="value")
-schema_dropdown.observe(on_schema_change, names="value")
-run_button.on_click(run_query)
+def launch_catalog_browser(default_limit: int = 20) -> None:
+    """Display the catalog/table explorer in the current notebook cell."""
+    display(_build_ui(default_limit))
 
-# Trigger initial population of schema & table lists
-on_catalog_change({"new": catalog_dropdown.value})
 
 # -----------------------------------------------------------------------------
-# Layout & display
+# Script entry‑point                                                            
 # -----------------------------------------------------------------------------
 
-ui = widgets.VBox([
-    widgets.HBox([catalog_dropdown, schema_dropdown]),
-    widgets.HBox([tables_select, widgets.VBox([limit_int, run_button])]),
-    custom_sql,
-    output,
-])
-
-display(ui)
-
-# COMMAND ----------
-# MAGIC %md
-# ### Tips
-# * **Generated query** — If you select one or multiple tables but leave the SQL box blank, the notebook builds a simple `SELECT *` query for you.
-# * **Custom query** — Enter any valid SQL in the text area to run it directly. The generated query is ignored if the box is not empty.
-# * **Row limit** — Adjust the slider to control how many rows are displayed from the query result.
-# * **Multiple tables** — Hold *⌘/Ctrl* to select more than one table in the list.
-# * **Schema refresh** — If new catalogs or tables are created during your session, re‑run the first helper cell to refresh the widget options.
-
-# Enjoy your interactive catalog explorer!
+if __name__ == "__main__":
+    launch_catalog_browser()
