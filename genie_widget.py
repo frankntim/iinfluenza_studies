@@ -34,7 +34,7 @@ from pyspark.sql import SparkSession
 __all__ = ["launch_catalog_browser"]
 
 # -----------------------------------------------------------------------------
-# Spark session helper                                                          
+# Spark session helper                                                           
 # -----------------------------------------------------------------------------
 
 def _spark() -> SparkSession:
@@ -43,7 +43,7 @@ def _spark() -> SparkSession:
 
 
 # -----------------------------------------------------------------------------
-# Metadata fetchers                                                             
+# Metadata fetchers                                                              
 # -----------------------------------------------------------------------------
 
 def _list_catalogs() -> list[str]:
@@ -63,7 +63,7 @@ def _list_tables(catalog: str, schema: str) -> list[str]:
 # UI builder                                                                    
 # -----------------------------------------------------------------------------
 
-def _build_ui(default_limit: int = 20) -> widgets.VBox:
+def _build_ui(default_limit: int = 20) -> widgets.Box:
     """Create and wire up ipywidgets components."""
 
     # --- widgets ---
@@ -112,13 +112,15 @@ def _build_ui(default_limit: int = 20) -> widgets.VBox:
     # initial populate
     _on_catalog({"new": catalog_dd.value})
 
-    # layout
-    return widgets.VBox([
+    # apply blue background to wrapper box
+    container = widgets.VBox([
         widgets.HBox([catalog_dd, schema_dd]),
         widgets.HBox([table_sel, widgets.VBox([limit_int, run_btn])]),
         sql_box,
         out,
     ])
+    styled = widgets.Box([container], layout=widgets.Layout(border='solid 1px gray', padding='10px', background_color='#e6f0ff'))
+    return styled
 
 
 # -----------------------------------------------------------------------------
