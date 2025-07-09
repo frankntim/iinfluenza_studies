@@ -17,6 +17,17 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
     state.agent = None
     state.df = None
 
+    # Tailwind CSS injection
+    display(HTML("""
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      .tailwind-container {
+        @apply flex flex-col items-center gap-4 p-4 bg-white bg-opacity-70 rounded-xl shadow-md w-full max-w-4xl mx-auto mt-6;
+      }
+      .no-cursor { cursor: default !important; }
+    </style>
+    """))
+
     # Background image
     if background_image_file and os.path.exists(background_image_file):
         with open(background_image_file, "rb") as f:
@@ -25,18 +36,13 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
         data_url = f"data:{mime};base64,{encoded}"
 
         display(HTML(f"""
-            <style>
-                .widget-app-container {{
-                    background-image: url('{data_url}');
-                    background-repeat: repeat;
-                    background-size: auto;
-                    padding: 20px;
-                    border-radius: 10px;
-                }}
-                .widget-app-container textarea {{
-                    font-family: monospace;
-                }}
-            </style>
+        <style>
+            body {{
+                background-image: url('{data_url}');
+                background-size: auto;
+                background-repeat: repeat;
+            }}
+        </style>
         """))
 
     # Optional header image
@@ -51,61 +57,38 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
             layout=widgets.Layout(width='90%', height='80px')
         )
 
-    # 🔷 Top "Survival Analysis" Button
-    analysis_button = widgets.Button(
+    # Styled widgets
+    top_button = widgets.Button(
         description="Survival Analysis",
         disabled=True,
         layout=widgets.Layout(width='90%', height='80px')
     )
-    analysis_button.add_class("flat-analysis-button")
+    top_button.add_class("no-cursor")
+    top_button.style.button_color = "#ADD8E6"
 
-    # 🔷 Title Box
     title_box = widgets.Textarea(
         value='Survival - Cox-Mixed Model',
         disabled=True,
-        layout=widgets.Layout(width='90%', height='80px'),
-        style={'description_width': 'initial'}
+        layout=widgets.Layout(width='90%', height='80px')
     )
-    title_box.add_class("title-box-style")
+    title_box.add_class("no-cursor")
 
-    # 🔷 Style for button and title box
-    display(HTML("""
-        <style>
-            .flat-analysis-button button {
-                background-color: #ADD8E6 !important;
-                color: black !important;
-                font-weight: bold;
-                font-size: 18px;
-                border: none !important;
-                box-shadow: none !important;
-                cursor: default !important;
-            }
-            .title-box-style textarea {
-                background-color: gray !important;
-                color: white !important;
-                font-weight: bold;
-                font-size: 16px;
-                border: none;
-                padding: 10px;
-                resize: none;
-            }
-        </style>
-    """))
-
-    # Widgets
     upload_widget = widgets.FileUpload(
         accept='.csv', multiple=False, description='Upload CSV'
     )
+
     chat_box = widgets.Textarea(
         value='',
         placeholder='Ask a question about your dataset...',
         description='Query:',
         layout=widgets.Layout(width='100%', height='100px')
     )
+
     submit_button = widgets.Button(
         description='Submit', button_style='success'
     )
-    output_area = widgets.Output(layout=widgets.Layout(border='1px solid gray', padding='10px'))
+
+    output_area = widgets.Output(layout=widgets.Layout(border='1px solid #ccc', padding='10px', width='100%'))
 
     # Upload logic
     def handle_upload(change):
@@ -136,7 +119,7 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
             with output_area:
                 print("⚠️ Please upload a CSV file first.")
             return
-        
+
         query = chat_box.value.strip()
         if not query:
             with output_area:
@@ -154,12 +137,13 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
 
     submit_button.on_click(on_submit_click)
 
-    # UI layout
-    elements = []
+    # Layout
+    ui_elements = []
     if header_image_widget:
-        elements.append(header_image_widget)
-    elements += [
-        analysis_button,
+        ui_elements.append(header_image_widget)
+
+    ui_elements += [
+        top_button,
         title_box,
         upload_widget,
         chat_box,
@@ -167,9 +151,7 @@ def launch_csv_chat_app(background_image_file: str = None, header_image_file: st
         output_area
     ]
 
-    container = widgets.VBox(elements)
-
-    if background_image_file:
-        container.add_class("widget-app-container")
+    container = widgets.VBox(ui_elements)
+    container.add_class("tailwind-container")
 
     display(container)
