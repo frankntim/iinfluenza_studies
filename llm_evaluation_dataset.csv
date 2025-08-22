@@ -1,0 +1,11 @@
+question,expected,response,model_name
+"What is the capital of France?","Paris.","Paris is the capital of France.","gpt-x"
+"2 + 2 equals what?","4","The answer is 4.","gpt-x"
+"Name the largest planet in our solar system.","Jupiter.","The largest planet is Jupiter.","gpt-x"
+"What is the boiling point of water at sea level?","100°C.","Water boils at 100 degrees Celsius at sea level.","gpt-x"
+"Who wrote Hamlet?","Shakespeare.","Hamlet was written by William Shakespeare.","gpt-y"
+"What is the square root of 16?","4.","The square root of 16 is four.","gpt-y"
+"Name the process by which plants make food.","Photosynthesis.","Plants make food through photosynthesis.","gpt-y"
+"Who painted the Mona Lisa?","Leonardo da Vinci.","The Mona Lisa was painted by Leonardo da Vinci.","gpt-y"
+"What is the capital of Japan?","Tokyo.","The capital city of Japan is Tokyo.","gpt-z"
+"What gas do humans need to breathe?","Oxygen.","Humans need oxygen to survive.","gpt-z"
